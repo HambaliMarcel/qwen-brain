@@ -1,4 +1,4 @@
-﻿# One command: ASR server + 4B server + live STT bus + brain dashboard.
+﻿# One command: ASR server + 27B server + live STT bus + brain dashboard.
 # Already-healthy ports are reused (no second GPU load).
 # Extra args go to the ASR integrator (same flags as `python -m qwen3_asr_stream mic`).
 #
@@ -28,7 +28,7 @@ if ([System.IO.Path]::GetFileName($AsrModel) -match '(?i)bf16') {
 }
 $AsrMmproj = if ($env:QWEN_ASR_MMPROJ) { $env:QWEN_ASR_MMPROJ } else { Join-Path $Models "mmproj-Qwen3-ASR-1.7B-Q8_0.gguf" }
 $AsrPort = if ($env:QWEN_ASR_PORT) { [int]$env:QWEN_ASR_PORT } else { 9999 }
-$BrainModel = if ($env:QWEN_BRAIN_MODEL) { $env:QWEN_BRAIN_MODEL } else { "C:\AI\models\Qwen3.5-4B-Q8_0.gguf" }
+$BrainModel = if ($env:QWEN_BRAIN_MODEL) { $env:QWEN_BRAIN_MODEL } else { "C:\AI\models\Qwen3.8-27B-Uncensored-YMQ-XS-TI.gguf" }
 $BrainPort = if ($env:QWEN_BRAIN_PORT) { [int]$env:QWEN_BRAIN_PORT } else { 8080 }
 $BrainCtx = if ($env:QWEN_BRAIN_CTX) { $env:QWEN_BRAIN_CTX } else { "8192" }
 $BusHost = if ($env:QWEN_BRAIN_STT_HOST) { $env:QWEN_BRAIN_STT_HOST } else { "127.0.0.1" }
