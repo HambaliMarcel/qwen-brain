@@ -16,7 +16,8 @@ from .events import (
     looks_complete,
     meaningfully_longer,
     same_turn,
-    with_sound_context,
+    scene_prompt,
+    strip_language_leak,
 )
 from .hermes import make_brain
 from .llm import LlamaBrain, StreamStats
@@ -27,22 +28,26 @@ from .ui import BrainUI
 STUCK_THINKING_SEC = 6.0
 STUCK_ANSWER_SEC = 8.0
 STALE_LIVE_SEC = 2.5
-LIVE_STABLE_SEC = 0.10
+LIVE_STABLE_SEC = 0.12
+FINALIZE_PAUSE_SEC = 0.45
+HOLD_PAUSE_SEC = 0.90
+EVENT_COOLDOWN_SEC = 2.2
 
 
 @dataclass
 class TurnPolicy:
-    """Fire the brain from live drafts, then revise if ASR grows the line.
+    """Fire the brain when speech actually ends, not on syllable gaps.
 
-    Primary trigger is a live pause (~160ms) or a sentence that already looks
-    complete — not the official LAST seal. Commit still upgrades a truncated
-    eager line. Speculative live starts while the last hop is still decoding.
+    Hidden speculation may start after a short silence on a complete line.
+    A visible YOU is only printed on LAST, or after a real hold with ASR idle.
+    Speech and in-flight hops never start a turn.
     """
 
     eager: bool = True
-    eager_silence_sec: float = 0.12
+    eager_silence_sec: float = 0.45
     revise_extra_chars: int = 8
     speculative: bool = True
+    hold_silence_sec: float = HOLD_PAUSE_SEC
     sent_uid: int = -1
     sent_text: str = ""
     inflight_uid: int = -1
@@ -50,7 +55,7 @@ class TurnPolicy:
     def should_ask(self, ev: SttEvent) -> Optional[str]:
         if ev.type == "sound":
             return None
-        text = (ev.text or "").strip()
+        text = strip_language_leak(ev.text or "")
         if not is_command_text(text):
             return None
         uid = ev.utterance_id
@@ -61,12 +66,14 @@ class TurnPolicy:
             return self._accept(uid, text)
         if not self.eager or ev.type != "live":
             return None
-        pause = max(float(ev.silence_sec), float(ev.gap_sec))
+        if ev.speaking or ev.decoding:
+            return None
+        pause = float(ev.silence_sec)
         complete = looks_complete(text)
-        if ev.speaking:
-            if not (self.speculative and complete):
+        if complete:
+            if pause < self.eager_silence_sec:
                 return None
-        elif pause < self.eager_silence_sec and not complete:
+        elif pause < self.hold_silence_sec:
             return None
         if uid == self.sent_uid and same_turn(self.sent_text, text):
             if not meaningfully_longer(self.sent_text, text, extra=self.revise_extra_chars):
@@ -91,6 +98,7 @@ class AssistantSession:
             eager=cfg.eager,
             eager_silence_sec=cfg.eager_silence_sec,
             revise_extra_chars=int(getattr(cfg, "eager_revise_chars", 8)),
+            hold_silence_sec=HOLD_PAUSE_SEC,
         )
         self._latest_prompt = ""
         self._fire_at = 0.0
@@ -112,6 +120,12 @@ class AssistantSession:
         self._result_text = ""
         self._result_stats = StreamStats()
         self._result_e2e_ms = 0.0
+        self._shown_uid = -1
+        self._shown_text = ""
+        self._shown_job = 0
+        self._printed_job = 0
+        self._last_sent_event = ""
+        self._last_sent_event_at = 0.0
         self._state_lock = threading.RLock()
 
     def run(self) -> int:
@@ -192,16 +206,63 @@ class AssistantSession:
         self.ui.note_sound(event, score=ev.event_score)
 
     def _prompt_for(self, text: str) -> str:
-        event = self._last_event
-        fresh = self._last_event_at and (monotonic() - self._last_event_at) < 6.0
-        if event and fresh:
-            return with_sound_context(text, event)
-        return text
+        # Room noise stays on STATUS. Do not prefix the 4B turn with it.
+        return strip_language_leak(text)
 
     def _clear_event_context(self) -> None:
         self._last_event = ""
         self._last_event_at = 0.0
         self.ui.event_label = ""
+
+    def _already_shown(self, uid: int, text: str) -> bool:
+        if uid < 0 or uid != self._shown_uid:
+            return False
+        return same_turn(self._shown_text, text)
+
+    def _mark_shown(self, uid: int, text: str, job: int) -> None:
+        self._shown_uid = uid
+        self._shown_text = text
+        self._shown_job = job
+
+    def _fire_scene(self, ev: SttEvent) -> None:
+        event = (ev.event or "").strip().strip("[]")
+        if not event and is_sound_tag(ev.text or ev.display):
+            event = (ev.text or ev.display).strip()[1:-1].strip()
+        if not event:
+            return
+        now = monotonic()
+        if (
+            event.lower() == self._last_sent_event.lower()
+            and (now - self._last_sent_event_at) < EVENT_COOLDOWN_SEC
+        ):
+            return
+        prompt = scene_prompt(event)
+        if self._already_shown(ev.utterance_id, prompt):
+            return
+        # Ambient tags stay on STATUS and attach to the next spoken line.
+        # They must not start a 4B turn of their own.
+        return
+
+    def _finalize_visible(self, text: str, ev: SttEvent, trigger: str) -> None:
+        if not is_command_text(text) and not (text or "").lower().startswith("[scene]"):
+            return
+        if self._already_shown(ev.utterance_id, text):
+            return
+        prompt = self._prompt_for(text)
+        same_speculation = (
+            ev.utterance_id == self.policy.sent_uid
+            and same_turn(self.policy.sent_text, text)
+            and not meaningfully_longer(self.policy.sent_text, text, extra=2)
+            and self._job_uid == ev.utterance_id
+            and self._job > 0
+        )
+        self.policy._accept(ev.utterance_id, text)
+        self._mark_shown(ev.utterance_id, text, self._job if same_speculation else self._job + 1)
+        if same_speculation:
+            self._promote_speculation(prompt)
+        else:
+            self._start_reply(prompt, trigger, uid=ev.utterance_id, publish=True)
+        self._clear_event_context()
 
     def _trigger_name(self, ev: SttEvent) -> str:
         if ev.type == "commit":
@@ -226,7 +287,7 @@ class AssistantSession:
             return False
         if ev.utterance_id != self.policy.inflight_uid:
             return True
-        live = (ev.text or "").strip()
+        live = strip_language_leak(ev.text or "")
         if not is_command_text(live):
             return False
         return not same_turn(self.policy.sent_text, live)
@@ -251,7 +312,7 @@ class AssistantSession:
                     ev.event = inner
                     m.last_event = inner
                     self._note_sound(ev)
-        live_text = (ev.text or "").strip()
+        live_text = strip_language_leak(ev.text or "")
         if ev.type == "live" and live_text != self._stable_text:
             self._stable_text = live_text
             self._stable_at = monotonic()
@@ -277,40 +338,40 @@ class AssistantSession:
             and not is_command_text(live_text)
         )
         if event_only:
-            # PANN/ASR tags are scene context. A tag by itself must never
-            # become a user question; it is attached to the next lexical turn.
+            if ev.type in {"sound", "commit"}:
+                self._fire_scene(ev)
             return
         if ev.type == "commit" and is_command_text(live_text):
-            final_prompt = self._prompt_for(live_text)
-            same_speculation = (
-                ev.utterance_id == self.policy.sent_uid
-                and same_turn(self.policy.sent_text, live_text)
-                and not meaningfully_longer(self.policy.sent_text, live_text, extra=2)
-            )
-            if same_speculation and self._job_uid == ev.utterance_id:
-                self.policy.sent_text = live_text
-                self._promote_speculation(final_prompt)
-            else:
-                self.policy._accept(ev.utterance_id, live_text)
-                self._start_reply(
-                    final_prompt,
-                    "commit",
-                    uid=ev.utterance_id,
-                    publish=True,
-                )
-            self._clear_event_context()
+            self._finalize_visible(live_text, ev, "commit")
             return
         if ev.type == "live" and ev.speaking and looks_complete(live_text):
             if (monotonic() - self._stable_at) < LIVE_STABLE_SEC:
                 return
         prompt = self.policy.should_ask(ev)
         if prompt:
+            visible = ev.type == "commit" or (
+                not ev.speaking
+                and not ev.decoding
+                and float(ev.silence_sec) >= HOLD_PAUSE_SEC
+            )
+            if visible and ev.type != "commit" and self._shown_uid == ev.utterance_id:
+                return
             self._start_reply(
                 self._prompt_for(prompt),
                 self._trigger_name(ev),
                 uid=ev.utterance_id,
-                publish=False,
+                publish=visible,
             )
+            return
+        finished_hold = (
+            ev.type == "live"
+            and not ev.speaking
+            and not ev.decoding
+            and float(ev.silence_sec) >= HOLD_PAUSE_SEC
+            and is_command_text(live_text)
+        )
+        if finished_hold:
+            self._finalize_visible(live_text, ev, "eager")
 
     def _start_reply(
         self,
@@ -331,6 +392,8 @@ class AssistantSession:
         self._publish_job = self._job if publish else 0
         self._visible_job = self._job if publish else 0
         self._result_job = 0
+        if publish:
+            self._mark_shown(uid, prompt, self._job)
         self.ui.trigger = trigger
         self.ui.brain = ""
         if publish:
@@ -340,14 +403,20 @@ class AssistantSession:
         self.ui.decode_ms = 0.0
         self.ui.e2e_ms = 0.0
         self.ui.tok_s = 0.0
-        hint = "final · first token…" if publish else "speculating · awaiting LAST"
+        hint = "final · first token…" if publish else "speculating"
         self.ui.set_status("THINKING", hint)
 
     def _promote_speculation(self, final_prompt: str) -> None:
-        """Make the latest hidden generation canonical once ASR emits LAST."""
+        """Make the latest hidden generation canonical once speech settles."""
         with self._state_lock:
             job = self._job
+            if self._shown_job and self._shown_job != job:
+                # A later visible job already owns the log line.
+                if self._publish_job and self._publish_job != job:
+                    return
             self._publish_job = job
+            self._visible_job = job
+            self._mark_shown(self._job_uid, final_prompt, job)
             self.ui.trigger = "commit"
             self.ui.set_you(final_prompt)
             if self._result_job == job and self._result_text:
@@ -373,7 +442,7 @@ class AssistantSession:
                 return
             acc.append(delta)
             self._last_token_at = monotonic()
-            if visible:
+            if job == self._visible_job:
                 self.tts.on_token(delta)
                 e2e = (monotonic() - self._fire_at) * 1000.0
                 self.ui.on_stream(delta, stats, e2e_ms=e2e)
@@ -415,7 +484,7 @@ class AssistantSession:
             )
         else:
             self._fire_at = 0.0
-            self.ui.set_status("LISTENING", "draft ready · awaiting LAST")
+            self.ui.set_status("LISTENING", "draft ready")
 
     def _publish_result(
         self,
@@ -427,6 +496,18 @@ class AssistantSession:
         *,
         remember: bool,
     ) -> None:
+        with self._state_lock:
+            job = self._job
+            if self._shown_job and self._shown_job != job and self._publish_job != job:
+                return
+            printed = getattr(self, "_printed_job", 0)
+            if printed == job and job:
+                self._publish_job = 0
+                self._visible_job = 0
+                self.policy.inflight_uid = -1
+                self._fire_at = 0.0
+                return
+            self._printed_job = job
         if remember and text:
             self.brain.remember_turn(prompt, text)
         self.ui.metrics.record_turn(
