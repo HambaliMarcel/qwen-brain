@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -102,3 +103,38 @@ def ensure_server(cfg: BrainConfig, start: bool) -> Optional[subprocess.Popen]:
     proc = start_server(cfg)
     wait_until_ready(cfg.url, timeout=240.0)
     return proc
+
+
+def fetch_context(url: str, fallback_ctx: int = 8192) -> tuple[int, int]:
+    """Return (tokens_used, n_ctx) from llama-server slots/props."""
+    base = url.rstrip("/")
+    try:
+        req = Request(base + "/slots", method="GET")
+        with urlopen(req, timeout=0.35) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        if isinstance(data, list) and data:
+            slot = data[0] if isinstance(data[0], dict) else {}
+        elif isinstance(data, dict):
+            slots = data.get("slots") or data.get("data") or []
+            slot = slots[0] if slots else data
+        else:
+            slot = {}
+        n_ctx = int(slot.get("n_ctx") or fallback_ctx)
+        used = slot.get("n_past")
+        if used is None:
+            used = int(slot.get("n_prompt_tokens") or 0) + int(slot.get("n_decoded") or 0)
+        return max(0, int(used)), max(1, n_ctx)
+    except Exception:
+        pass
+    try:
+        req = Request(base + "/props", method="GET")
+        with urlopen(req, timeout=0.35) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        n_ctx = int(
+            (data.get("default_generation_settings") or {}).get("n_ctx")
+            or data.get("n_ctx")
+            or fallback_ctx
+        )
+        return 0, max(1, n_ctx)
+    except Exception:
+        return 0, max(1, fallback_ctx)
