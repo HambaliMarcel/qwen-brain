@@ -109,6 +109,16 @@ class AssistantSession:
         except Exception:
             pass
 
+    def _should_barge(self, ev: SttEvent) -> bool:
+        if self.policy.inflight_uid < 0:
+            return False
+        if ev.utterance_id != self.policy.inflight_uid:
+            return True
+        live = (ev.text or "").strip()
+        if not is_command_text(live):
+            return False
+        return not same_turn(self.policy.sent_text, live)
+
     def _on_event(self, ev: SttEvent) -> None:
         m = self.ui.metrics
         m.utterance_id = ev.utterance_id
@@ -121,16 +131,15 @@ class AssistantSession:
         busy = self.ui.status in {"THINKING", "ANSWERING"}
         if ev.type == "live":
             self.ui.set_live(ev.text)
-            if ev.speaking:
-                if self.policy.inflight_uid >= 0:
-                    self.brain.cancel()
-                    self.tts.cancel()
-                    self.policy.inflight_uid = -1
-                    self.ui.note_cut("barge-in")
-                elif not busy:
-                    self.ui.set_status("SPEAKING", ev.language or "mix")
+            if ev.speaking and self._should_barge(ev):
+                self.brain.cancel()
+                self.tts.cancel()
+                self.policy.inflight_uid = -1
+                self.ui.note_cut("barge-in")
             elif not busy:
-                if ev.decoding:
+                if ev.speaking:
+                    self.ui.set_status("SPEAKING", ev.language or "mix")
+                elif ev.decoding:
                     self.ui.set_status("LISTENING", "STT decoding")
                 else:
                     self.ui.set_status("LISTENING", ev.language or "ears on")
