@@ -96,10 +96,12 @@ class SttBusClient:
         host: str = "127.0.0.1",
         port: int = 18765,
         on_status: Optional[Callable[[str], None]] = None,
+        on_idle: Optional[Callable[[], None]] = None,
     ):
         self.host = host
         self.port = port
         self.on_status = on_status
+        self.on_idle = on_idle
         self._stop = threading.Event()
 
     def stop(self) -> None:
@@ -113,7 +115,7 @@ class SttBusClient:
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 sock.settimeout(3.0)
                 sock.connect((self.host, self.port))
-                sock.settimeout(0.4)
+                sock.settimeout(0.25)
                 if self.on_status:
                     self.on_status(f"stt bus {self.host}:{self.port}")
                 backoff = 0.2
@@ -135,6 +137,11 @@ class SttBusClient:
             try:
                 chunk = sock.recv(4096)
             except socket.timeout:
+                if self.on_idle:
+                    try:
+                        self.on_idle()
+                    except Exception:
+                        pass
                 continue
             except OSError:
                 return
