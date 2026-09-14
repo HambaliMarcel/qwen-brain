@@ -21,7 +21,11 @@ $BrainRoot = Split-Path -Parent $PSScriptRoot
 $AsrRoot = if ($env:QWEN_ASR_ROOT) { $env:QWEN_ASR_ROOT } else { "C:\Users\marce\Projects\qwen3-asr-stream" }
 $Llama = if ($env:LLAMA_SERVER) { $env:LLAMA_SERVER } else { "C:\AI\llama.cpp\llama-server.exe" }
 $Models = if ($env:QWEN_ASR_MODELS_DIR) { $env:QWEN_ASR_MODELS_DIR } else { "C:\AI\models" }
-$AsrModel = if ($env:QWEN_ASR_MODEL) { $env:QWEN_ASR_MODEL } else { Join-Path $Models "Qwen3-ASR-1.7B-bf16.gguf" }
+$AsrModel = if ($env:QWEN_ASR_MODEL) { $env:QWEN_ASR_MODEL } else { Join-Path $Models "Qwen3-ASR-1.7B-Q8_0.gguf" }
+if ([System.IO.Path]::GetFileName($AsrModel) -match '(?i)bf16') {
+    $AsrModel = Join-Path $Models "Qwen3-ASR-1.7B-Q8_0.gguf"
+    Write-Host "ASR      bf16 is disabled; using $AsrModel"
+}
 $AsrMmproj = if ($env:QWEN_ASR_MMPROJ) { $env:QWEN_ASR_MMPROJ } else { Join-Path $Models "mmproj-Qwen3-ASR-1.7B-Q8_0.gguf" }
 $AsrPort = if ($env:QWEN_ASR_PORT) { [int]$env:QWEN_ASR_PORT } else { 9999 }
 $BrainModel = if ($env:QWEN_BRAIN_MODEL) { $env:QWEN_BRAIN_MODEL } else { "C:\AI\models\Qwen3.5-4B-Q8_0.gguf" }
@@ -165,16 +169,17 @@ $asrUrl = "http://127.0.0.1:$AsrPort/health"
 $brainUrl = "http://127.0.0.1:$BrainPort/health"
 
 if (Test-HttpOk $asrUrl) {
-    Write-Host "reuse    ASR llama-server  :$AsrPort"
+    $loaded = ""
     try {
         $props = Invoke-RestMethod -Uri "http://127.0.0.1:$AsrPort/props" -TimeoutSec 2
         $loaded = [string]($props.model_path)
         if (-not $loaded) { $loaded = [string]$props }
-        $want = [System.IO.Path]::GetFileName($AsrModel)
-        if ($want -and ($loaded -notmatch [regex]::Escape($want))) {
-            Write-Host "WARN     port $AsrPort is not $want - run Stop.bat then Start.bat to load bf16"
-        }
     } catch {}
+    $want = [System.IO.Path]::GetFileName($AsrModel)
+    if ($want -and $loaded -and ($loaded -notmatch [regex]::Escape($want))) {
+        throw "port $AsrPort is running $loaded, want $want. Run Stop.bat then Start.bat."
+    }
+    Write-Host "reuse    ASR llama-server  :$AsrPort"
 } else {
     Start-TitledProcess "Qwen ASR server" $llamaDir $Llama @(
         "-m", $AsrModel,
