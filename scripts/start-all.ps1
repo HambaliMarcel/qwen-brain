@@ -1,4 +1,4 @@
-# One command: ASR server + 4B server + live STT bus + brain dashboard.
+﻿# One command: ASR server + 4B server + live STT bus + brain dashboard.
 # Already-healthy ports are reused (no second GPU load).
 # Extra args go to the ASR integrator (same flags as `python -m qwen3_asr_stream mic`).
 #
@@ -21,7 +21,7 @@ $BrainRoot = Split-Path -Parent $PSScriptRoot
 $AsrRoot = if ($env:QWEN_ASR_ROOT) { $env:QWEN_ASR_ROOT } else { "C:\Users\marce\Projects\qwen3-asr-stream" }
 $Llama = if ($env:LLAMA_SERVER) { $env:LLAMA_SERVER } else { "C:\AI\llama.cpp\llama-server.exe" }
 $Models = if ($env:QWEN_ASR_MODELS_DIR) { $env:QWEN_ASR_MODELS_DIR } else { "C:\AI\models" }
-$AsrModel = if ($env:QWEN_ASR_MODEL) { $env:QWEN_ASR_MODEL } else { Join-Path $Models "Qwen3-ASR-1.7B-Q8_0.gguf" }
+$AsrModel = if ($env:QWEN_ASR_MODEL) { $env:QWEN_ASR_MODEL } else { Join-Path $Models "Qwen3-ASR-1.7B-bf16.gguf" }
 $AsrMmproj = if ($env:QWEN_ASR_MMPROJ) { $env:QWEN_ASR_MMPROJ } else { Join-Path $Models "mmproj-Qwen3-ASR-1.7B-Q8_0.gguf" }
 $AsrPort = if ($env:QWEN_ASR_PORT) { [int]$env:QWEN_ASR_PORT } else { 9999 }
 $BrainModel = if ($env:QWEN_BRAIN_MODEL) { $env:QWEN_BRAIN_MODEL } else { "C:\AI\models\Qwen3.5-4B-Q8_0.gguf" }
@@ -110,8 +110,29 @@ if (-not (Test-Path -LiteralPath $BrainModel)) { throw "brain GGUF not found: $B
 Set-Location -LiteralPath $BrainRoot
 $llamaDir = Split-Path -Parent $Llama
 
+$flags = @()
+if ($IntegratorArgs -and $IntegratorArgs.Count -gt 0) {
+    $flags = @($IntegratorArgs)
+}
+if ($flags -notcontains "--profile") {
+    $flags = @("--profile", "ultralow") + $flags
+}
+if ($flags -notcontains "--max-tokens") {
+    $flags += @("--max-tokens", "32")
+}
+if ($flags -notcontains "--unfixed-chunks") {
+    $flags += @("--unfixed-chunks", "2")
+}
+if ($flags -notcontains "--unfixed-tokens") {
+    $flags += @("--unfixed-tokens", "5")
+}
+if ($flags -notcontains "--pann-interval") {
+    $flags += @("--pann-interval", "0.45")
+}
+
 Write-Host "Qwen stack  one-shot"
 Write-Host "  ASR    $AsrModel  :$AsrPort"
+Write-Host "  mmproj $AsrMmproj"
 Write-Host "  brain  $BrainModel  :$BrainPort"
 Write-Host "  bus    ${BusHost}:${BusPort}"
 Write-Host ""
@@ -121,6 +142,15 @@ $brainUrl = "http://127.0.0.1:$BrainPort/health"
 
 if (Test-HttpOk $asrUrl) {
     Write-Host "reuse    ASR llama-server  :$AsrPort"
+    try {
+        $props = Invoke-RestMethod -Uri "http://127.0.0.1:$AsrPort/props" -TimeoutSec 2
+        $loaded = [string]($props.model_path)
+        if (-not $loaded) { $loaded = [string]$props }
+        $want = [System.IO.Path]::GetFileName($AsrModel)
+        if ($want -and ($loaded -notmatch [regex]::Escape($want))) {
+            Write-Host "WARN     port $AsrPort is not $want - run Stop.bat then Start.bat to load bf16"
+        }
+    } catch {}
 } else {
     Start-TitledProcess "Qwen ASR server" $llamaDir $Llama @(
         "-m", $AsrModel,
@@ -155,7 +185,11 @@ if (Test-HttpOk $brainUrl) {
         "-fa", "on",
         "--jinja",
         "--cache-prompt",
-        "--no-webui"
+        "--no-webui",
+        "--reasoning-budget", "0",
+        "--chat-template-kwargs", '{"enable_thinking":false}',
+        "-ctk", "q8_0",
+        "-ctv", "q8_0"
     )
     Wait-HttpOk $brainUrl 240 "brain llama-server"
 }
@@ -167,10 +201,7 @@ if (Test-PortOpen $BusHost $BusPort) {
         "-m", "qwen3_asr_stream.integrator",
         "--bus-host", $BusHost,
         "--bus-port", "$BusPort"
-    )
-    if ($IntegratorArgs -and $IntegratorArgs.Count -gt 0) {
-        $pyArgs += $IntegratorArgs
-    }
+    ) + $flags
     Start-TitledProcess "Qwen ASR bus" $AsrRoot "python" $pyArgs
     Wait-PortOpen $BusHost $BusPort 60 "STT bus"
 }
