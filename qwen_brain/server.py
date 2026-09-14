@@ -1,4 +1,4 @@
-"""Launch llama-server for the Qwen3.5-4B chat brain (not the ASR GGUF)."""
+"""Launch llama-server for the Qwen3.8-27B chat brain (not the ASR GGUF)."""
 
 from __future__ import annotations
 
@@ -65,6 +65,18 @@ def build_server_cmd(cfg: BrainConfig, extra: Optional[list[str]] = None) -> lis
         "-ctv",
         "q8_0",
     ]
+    spec = (cfg.spec_type or "").strip().lower()
+    if spec and spec not in {"none", "off", "0"}:
+        cmd.extend(
+            [
+                "--spec-type",
+                cfg.spec_type,
+                "--spec-draft-n-max",
+                str(cfg.spec_draft_n_max),
+                "--spec-draft-ngl",
+                str(cfg.ngl),
+            ]
+        )
     if extra:
         cmd.extend(extra)
     return cmd
