@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
 from dataclasses import dataclass
 from typing import Callable, Iterator, Optional
@@ -46,9 +47,20 @@ class LlamaBrain:
         self.base_url = cfg.url.rstrip("/")
         self.history: list[ChatTurn] = []
         self._gen = 0
+        self._resp = None
+        self._resp_lock = threading.Lock()
 
     def cancel(self) -> None:
+        """Abort the in-flight HTTP stream so the GPU slot is freed immediately."""
         self._gen += 1
+        with self._resp_lock:
+            resp = self._resp
+            self._resp = None
+        if resp is not None:
+            try:
+                resp.close()
+            except Exception:
+                pass
 
     def reset(self) -> None:
         self.history.clear()
@@ -97,6 +109,12 @@ class LlamaBrain:
                 if on_token is not None:
                     on_token(delta, stats)
         except Exception:
+            if gen != self._gen:
+                stats.cancelled = True
+                stats.total_ms = (time.perf_counter() - t0) * 1000.0
+                if self.history and self.history[-1].role == "user":
+                    self.history.pop()
+                return "", stats
             if not pieces:
                 if self.history and self.history[-1].role == "user":
                     self.history.pop()
@@ -132,9 +150,12 @@ class LlamaBrain:
         payload = {
             "messages": messages,
             "temperature": self.cfg.temperature,
-            "top_p": 0.9,
+            "top_p": float(getattr(self.cfg, "top_p", 0.8)),
+            "top_k": int(getattr(self.cfg, "top_k", 20)),
+            "min_p": 0.0,
             "max_tokens": self.cfg.max_tokens,
             "stream": True,
+            "stream_options": {"include_usage": True},
             "cache_prompt": True,
             "chat_template_kwargs": {"enable_thinking": False},
             "reasoning_budget": 0,
@@ -148,46 +169,64 @@ class LlamaBrain:
         )
         buf = ""
         hold = ""
+        resp = None
         try:
-            with urlopen(req, timeout=120.0) as resp:
-                while gen == self._gen:
-                    chunk = resp.read(256)
-                    if not chunk:
-                        break
-                    buf += chunk.decode("utf-8", errors="replace")
-                    while "\n" in buf:
-                        line, buf = buf.split("\n", 1)
-                        line = line.strip()
-                        if not line.startswith("data:"):
-                            continue
-                        payload_s = line[5:].strip()
-                        if payload_s == "[DONE]":
-                            if hold:
-                                yield hold
-                            return
-                        try:
-                            evt = json.loads(payload_s)
-                        except json.JSONDecodeError:
-                            continue
-                        if stats is not None:
-                            apply_llama_timings(stats, evt)
-                        choices = evt.get("choices") or []
-                        if not choices:
-                            continue
-                        delta = (choices[0].get("delta") or {}).get("content") or ""
-                        if not delta:
-                            continue
-                        hold += delta
-                        hold, emit = split_think_stream(hold)
-                        if emit:
-                            yield emit
-                if hold:
-                    yield strip_think(hold)
+            resp = urlopen(req, timeout=45.0)
+            with self._resp_lock:
+                self._resp = resp
+            while gen == self._gen:
+                chunk = resp.read(128)
+                if not chunk:
+                    break
+                buf += chunk.decode("utf-8", errors="replace")
+                while "\n" in buf:
+                    line, buf = buf.split("\n", 1)
+                    line = line.strip()
+                    if not line.startswith("data:"):
+                        continue
+                    payload_s = line[5:].strip()
+                    if payload_s == "[DONE]":
+                        if hold:
+                            yield hold
+                        return
+                    try:
+                        evt = json.loads(payload_s)
+                    except json.JSONDecodeError:
+                        continue
+                    if stats is not None:
+                        apply_llama_timings(stats, evt)
+                    choices = evt.get("choices") or []
+                    if not choices:
+                        continue
+                    delta = (choices[0].get("delta") or {}).get("content") or ""
+                    if not delta:
+                        continue
+                    hold += delta
+                    hold, emit = split_think_stream(hold)
+                    if emit:
+                        yield emit
+            if hold and gen == self._gen:
+                yield strip_think(hold)
         except HTTPError as e:
             body = e.read().decode("utf-8", errors="replace")
             raise LlamaServerError(f"/v1/chat/completions HTTP {e.code}: {body[:800]}") from e
         except URLError as e:
+            if gen != self._gen:
+                return
             raise LlamaServerError(f"Cannot reach brain llama-server at {self.base_url}: {e.reason}") from e
+        except (OSError, ValueError):
+            if gen != self._gen:
+                return
+            raise
+        finally:
+            with self._resp_lock:
+                if self._resp is resp:
+                    self._resp = None
+            if resp is not None:
+                try:
+                    resp.close()
+                except Exception:
+                    pass
 
 
 def strip_think(text: str) -> str:
