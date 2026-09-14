@@ -45,7 +45,7 @@ MAX_TURNS = 80
 
 
 def enable_windows_vt() -> None:
-    apply_light_terminal("Qwen brain")
+    apply_light_terminal("brain")
 
 
 def _ms(v: float) -> str:
@@ -92,7 +92,7 @@ def you_parts(final: str, live: str, event: str = "") -> tuple[str, str]:
 class BrainUI:
     def __init__(self) -> None:
         self._started = False
-        self.title = "QWEN BRAIN"
+        self.title = "BRAIN"
         self.detail = "live STT -> local 4B"
         self.status = "WAITING"
         self.hint = "waiting for STT bus"
@@ -139,8 +139,8 @@ class BrainUI:
         self._last_brain_canon = ""
 
     def banner(self, title: str, detail: str) -> None:
-        apply_light_terminal("Qwen brain")
-        self.title = title.split("·")[0].strip().upper() or "QWEN BRAIN"
+        apply_light_terminal("brain")
+        self.title = title.split("·")[0].strip().upper() or "BRAIN"
         self.detail = detail
         self._refresh_geom()
         sys.stdout.write(PAPER + SHOW + f"{CSI}r" + CLEAR + HOME)
