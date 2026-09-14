@@ -72,6 +72,8 @@ class BrainConfig:
     backend: str = "llm"  # llm | hermes
     hermes_api: str = DEFAULT_HERMES_API
     hermes_api_key: str = ""
+    spec_type: str = "draft-mtp"
+    spec_draft_n_max: int = 2
     system_prompt: str = VOICE_SYSTEM_PROMPT
 
     @property
@@ -96,4 +98,6 @@ class BrainConfig:
             hermes_api_key=os.environ.get("HERMES_API_KEY", os.environ.get("API_SERVER_KEY", "")),
             backend=os.environ.get("QWEN_BRAIN_BACKEND", "llm").strip().lower(),
             eager_silence_sec=float(os.environ.get("QWEN_BRAIN_EAGER_SILENCE", "0.45")),
+            spec_type=os.environ.get("QWEN_BRAIN_SPEC_TYPE", "draft-mtp").strip() or "none",
+            spec_draft_n_max=int(os.environ.get("QWEN_BRAIN_SPEC_DRAFT_N_MAX", "2")),
         )
