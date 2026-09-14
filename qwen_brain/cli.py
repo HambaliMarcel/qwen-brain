@@ -98,7 +98,7 @@ def cmd_chat(args: argparse.Namespace) -> int:
             return 0
         acc: list[str] = []
         print("brain> ", end="", flush=True)
-        def on_token(delta: str) -> None:
+        def on_token(delta: str, stats=None) -> None:
             acc.append(delta)
             sys.stdout.write(delta)
             sys.stdout.flush()
@@ -106,7 +106,10 @@ def cmd_chat(args: argparse.Namespace) -> int:
         text, stats = brain.ask(line, on_token=on_token)
         if text and not acc:
             sys.stdout.write(text)
-        print(f"\n  ttft {stats.first_token_ms:.0f}ms  total {stats.total_ms:.0f}ms")
+        print(
+            f"\n  ttft {stats.first_token_ms:.0f}ms  gen {stats.total_ms:.0f}ms  "
+            f"{stats.tok_s:.0f} tok/s  tok {stats.tokens}"
+        )
     return 0
 
 
