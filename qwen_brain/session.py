@@ -16,6 +16,8 @@ from .server import fetch_context
 from .tts import NullTts, TtsSink
 from .ui import BrainUI
 
+STUCK_THINKING_SEC = 12.0
+
 
 @dataclass
 class TurnPolicy:
@@ -71,6 +73,7 @@ class AssistantSession:
         self._latest_prompt = ""
         self._fire_at = 0.0
         self._trigger = ""
+        self._stop = threading.Event()
 
     def run(self) -> int:
         self.ui.backend = self.cfg.backend
@@ -82,6 +85,7 @@ class AssistantSession:
             f"STT {self.ui.stt_endpoint}  ·  LLM {self.ui.llm_endpoint}  ·  {self.cfg.backend}",
         )
         self._refresh_context()
+        threading.Thread(target=self._watchdog, name="brain-watchdog", daemon=True).start()
         client = SttBusClient(
             self.cfg.stt_host,
             self.cfg.stt_port,
@@ -89,14 +93,31 @@ class AssistantSession:
         )
         try:
             for ev in client.iter_events():
+                if self._stop.is_set():
+                    break
                 self._on_event(ev)
         except KeyboardInterrupt:
             self.brain.cancel()
             self.tts.cancel()
         finally:
+            self._stop.set()
             client.stop()
             self.ui.close()
         return 0
+
+    def _watchdog(self) -> None:
+        while not self._stop.wait(0.5):
+            if self.ui.status != "THINKING":
+                continue
+            if self._fire_at <= 0:
+                continue
+            if (monotonic() - self._fire_at) < STUCK_THINKING_SEC:
+                continue
+            self.brain.cancel()
+            self.tts.cancel()
+            self.policy.inflight_uid = -1
+            self.ui.note_stuck(f"thinking >{int(STUCK_THINKING_SEC)}s, reset")
+            self._fire_at = 0.0
 
     def _refresh_context(self) -> None:
         if self.cfg.backend != "llm":
