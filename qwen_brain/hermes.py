@@ -43,44 +43,64 @@ class HermesBrain(LlamaBrain):
             method="POST",
         )
         buf = ""
+        resp = None
         try:
-            with urlopen(req, timeout=180.0) as resp:
-                while gen == self._gen:
-                    chunk = resp.read(256)
-                    if not chunk:
-                        break
-                    buf += chunk.decode("utf-8", errors="replace")
-                    while "\n" in buf:
-                        line, buf = buf.split("\n", 1)
-                        line = line.strip()
-                        if not line.startswith("data:"):
-                            continue
-                        payload_s = line[5:].strip()
-                        if payload_s == "[DONE]":
-                            return
-                        try:
-                            evt = json.loads(payload_s)
-                        except json.JSONDecodeError:
-                            continue
-                        if stats is not None:
-                            apply_llama_timings(stats, evt)
-                        choices = evt.get("choices") or []
-                        if not choices:
-                            continue
-                        delta = (choices[0].get("delta") or {}).get("content") or ""
-                        if delta:
-                            yield delta
+            resp = urlopen(req, timeout=45.0)
+            with self._resp_lock:
+                self._resp = resp
+            while gen == self._gen:
+                chunk = resp.read(128)
+                if not chunk:
+                    break
+                buf += chunk.decode("utf-8", errors="replace")
+                while "\n" in buf:
+                    line, buf = buf.split("\n", 1)
+                    line = line.strip()
+                    if not line.startswith("data:"):
+                        continue
+                    payload_s = line[5:].strip()
+                    if payload_s == "[DONE]":
+                        return
+                    try:
+                        evt = json.loads(payload_s)
+                    except json.JSONDecodeError:
+                        continue
+                    if stats is not None:
+                        apply_llama_timings(stats, evt)
+                    choices = evt.get("choices") or []
+                    if not choices:
+                        continue
+                    delta = (choices[0].get("delta") or {}).get("content") or ""
+                    if delta:
+                        yield delta
         except HTTPError as e:
+            if gen != self._gen:
+                return
             body = e.read().decode("utf-8", errors="replace")
             raise LlamaServerError(
                 f"Hermes API {self.base_url} HTTP {e.code}: {body[:800]}. "
                 "Leave --backend llm for the local 4B, or start Hermes gateway."
             ) from e
         except URLError as e:
+            if gen != self._gen:
+                return
             raise LlamaServerError(
                 f"Hermes API not reachable at {self.base_url}: {e.reason}. "
                 "MVP uses --backend llm (local Qwen3.5-4B)."
             ) from e
+        except OSError:
+            if gen != self._gen:
+                return
+            raise
+        finally:
+            with self._resp_lock:
+                if self._resp is resp:
+                    self._resp = None
+            if resp is not None:
+                try:
+                    resp.close()
+                except Exception:
+                    pass
 
 
 def make_brain(cfg: BrainConfig) -> LlamaBrain:
