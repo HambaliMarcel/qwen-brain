@@ -11,6 +11,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from .config import BrainConfig, VOICE_SYSTEM_PROMPT
+from .metrics import tok_per_sec
 from .server import LlamaServerError
 
 THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
@@ -28,7 +29,15 @@ class ChatTurn:
 class StreamStats:
     first_token_ms: float = 0.0
     total_ms: float = 0.0
+    decode_ms: float = 0.0
     tokens: int = 0
+    chunks: int = 0
+    chars: int = 0
+    prompt_tokens: int = 0
+    prompt_ms: float = 0.0
+    predicted_ms: float = 0.0
+    tok_s: float = 0.0
+    cancelled: bool = False
 
 
 class LlamaBrain:
@@ -52,7 +61,7 @@ class LlamaBrain:
     def ask(
         self,
         user_text: str,
-        on_token: Optional[Callable[[str], None]] = None,
+        on_token: Optional[Callable[[str, StreamStats], None]] = None,
     ) -> tuple[str, StreamStats]:
         self._gen += 1
         gen = self._gen
@@ -60,21 +69,33 @@ class LlamaBrain:
         self._trim()
         stats = StreamStats()
         t0 = time.perf_counter()
+        t_first: float | None = None
         pieces: list[str] = []
         first = True
         try:
-            for delta in self._stream(self._messages(), gen):
+            for delta in self._stream(self._messages(), gen, stats):
                 if gen != self._gen:
                     break
                 if not delta:
                     continue
+                now = time.perf_counter()
                 if first:
-                    stats.first_token_ms = (time.perf_counter() - t0) * 1000.0
+                    stats.first_token_ms = (now - t0) * 1000.0
+                    t_first = now
                     first = False
                 pieces.append(delta)
-                stats.tokens += 1
+                stats.chunks += 1
+                stats.chars += len(delta)
+                if stats.tokens < stats.chunks:
+                    stats.tokens = stats.chunks
+                if t_first is not None:
+                    decode_s = now - t_first
+                    if decode_s > 0.05:
+                        stats.decode_ms = decode_s * 1000.0
+                        if stats.tok_s <= 0 or not stats.predicted_ms:
+                            stats.tok_s = stats.tokens / decode_s
                 if on_token is not None:
-                    on_token(delta)
+                    on_token(delta, stats)
         except Exception:
             if not pieces:
                 if self.history and self.history[-1].role == "user":
@@ -82,7 +103,12 @@ class LlamaBrain:
                 raise
         text = strip_think("".join(pieces)).strip()
         stats.total_ms = (time.perf_counter() - t0) * 1000.0
+        if stats.decode_ms <= 0 and stats.first_token_ms > 0:
+            stats.decode_ms = max(0.0, stats.total_ms - stats.first_token_ms)
+        if stats.tok_s <= 0:
+            stats.tok_s = tok_per_sec(stats.tokens, stats.decode_ms or stats.total_ms)
         cancelled = gen != self._gen
+        stats.cancelled = cancelled
         if cancelled or not text:
             if self.history and self.history[-1].role == "user":
                 self.history.pop()
@@ -102,7 +128,7 @@ class LlamaBrain:
             msgs.append({"role": turn.role, "content": turn.content})
         return msgs
 
-    def _stream(self, messages: list[dict], gen: int = 0) -> Iterator[str]:
+    def _stream(self, messages: list[dict], gen: int = 0, stats: StreamStats | None = None) -> Iterator[str]:
         payload = {
             "messages": messages,
             "temperature": self.cfg.temperature,
@@ -143,6 +169,8 @@ class LlamaBrain:
                             evt = json.loads(payload_s)
                         except json.JSONDecodeError:
                             continue
+                        if stats is not None:
+                            apply_llama_timings(stats, evt)
                         choices = evt.get("choices") or []
                         if not choices:
                             continue
@@ -184,3 +212,33 @@ def split_think_stream(buf: str) -> tuple[str, str]:
         if end < 0:
             return rest[start:], "".join(out)
         rest = rest[end + len(THINK_CLOSE) :]
+
+
+def apply_llama_timings(stats: StreamStats, evt: dict) -> None:
+    usage = evt.get("usage") or {}
+    if isinstance(usage, dict):
+        prompt = usage.get("prompt_tokens")
+        comp = usage.get("completion_tokens")
+        if prompt:
+            stats.prompt_tokens = int(prompt)
+        if comp:
+            stats.tokens = int(comp)
+    timings = evt.get("timings") or {}
+    if not isinstance(timings, dict):
+        return
+    if timings.get("prompt_n"):
+        stats.prompt_tokens = int(timings["prompt_n"])
+    if timings.get("prompt_ms"):
+        stats.prompt_ms = float(timings["prompt_ms"])
+    if timings.get("predicted_ms"):
+        stats.predicted_ms = float(timings["predicted_ms"])
+    n = timings.get("predicted_n") or timings.get("predicted_tokens")
+    if n:
+        stats.tokens = int(n)
+    tps = (
+        timings.get("predicted_per_second")
+        or timings.get("predicted_n_per_second")
+        or timings.get("tokens_predicted_per_second")
+    )
+    if tps:
+        stats.tok_s = float(tps)
