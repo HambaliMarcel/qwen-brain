@@ -35,6 +35,7 @@ class SessionMetrics:
     tok_s: list[float] = field(default_factory=list)
     last_trigger: str = ""
     last_language: str = ""
+    last_event: str = ""
     utterance_id: int = 0
     silence_sec: float = 0.0
     speaking: bool = False
@@ -55,7 +56,7 @@ class SessionMetrics:
     ) -> None:
         self.turns += 1
         self.last_trigger = trigger
-        if trigger == "eager":
+        if trigger == "eager" or trigger == "live":
             self.eager_turns += 1
         elif trigger == "commit":
             self.commit_turns += 1
