@@ -31,6 +31,8 @@ $AsrPort = if ($env:QWEN_ASR_PORT) { [int]$env:QWEN_ASR_PORT } else { 9999 }
 $BrainModel = if ($env:QWEN_BRAIN_MODEL) { $env:QWEN_BRAIN_MODEL } else { "C:\AI\models\Qwen3.8-27B-Uncensored-YMQ-XS-TI.gguf" }
 $BrainPort = if ($env:QWEN_BRAIN_PORT) { [int]$env:QWEN_BRAIN_PORT } else { 8080 }
 $BrainCtx = if ($env:QWEN_BRAIN_CTX) { $env:QWEN_BRAIN_CTX } else { "8192" }
+$BrainSpecType = if ($env:QWEN_BRAIN_SPEC_TYPE) { $env:QWEN_BRAIN_SPEC_TYPE } else { "draft-mtp" }
+$BrainSpecDraftNMax = if ($env:QWEN_BRAIN_SPEC_DRAFT_N_MAX) { $env:QWEN_BRAIN_SPEC_DRAFT_N_MAX } else { "2" }
 $BusHost = if ($env:QWEN_BRAIN_STT_HOST) { $env:QWEN_BRAIN_STT_HOST } else { "127.0.0.1" }
 $BusPort = if ($env:QWEN_BRAIN_STT_PORT) { [int]$env:QWEN_BRAIN_STT_PORT } else { 18765 }
 
@@ -162,6 +164,7 @@ Write-Host "Qwen stack  one-shot"
 Write-Host "  ASR    $AsrModel  :$AsrPort"
 Write-Host "  mmproj $AsrMmproj"
 Write-Host "  brain  $BrainModel  :$BrainPort"
+Write-Host "  mtp    $BrainSpecType  n-max $BrainSpecDraftNMax"
 Write-Host "  bus    ${BusHost}:${BusPort}"
 Write-Host ""
 
@@ -204,7 +207,7 @@ if (Test-HttpOk $asrUrl) {
 if (Test-HttpOk $brainUrl) {
     Write-Host "reuse    brain llama-server  :$BrainPort"
 } else {
-    Start-TitledProcess "Qwen brain server" $llamaDir $Llama @(
+    $brainArgs = @(
         "-m", $BrainModel,
         "-ngl", "99",
         "-c", "$BrainCtx",
@@ -220,6 +223,14 @@ if (Test-HttpOk $brainUrl) {
         "-ctk", "q8_0",
         "-ctv", "q8_0"
     )
+    if ($BrainSpecType -and ($BrainSpecType -notmatch '^(?i)(none|off|0)$')) {
+        $brainArgs += @(
+            "--spec-type", $BrainSpecType,
+            "--spec-draft-n-max", "$BrainSpecDraftNMax",
+            "--spec-draft-ngl", "99"
+        )
+    }
+    Start-TitledProcess "Qwen brain server" $llamaDir $Llama $brainArgs
     Wait-HttpOk $brainUrl 240 "brain llama-server"
 }
 
