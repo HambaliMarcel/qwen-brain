@@ -93,14 +93,14 @@ class BrainUI:
     def __init__(self) -> None:
         self._started = False
         self.title = "BRAIN"
-        self.detail = "live STT -> local 4B"
+        self.detail = "live STT -> local 27B"
         self.status = "WAITING"
         self.hint = "waiting for STT bus"
         self.live = ""
         self.you = ""
         self.brain = ""
         self.backend = "llm"
-        self.model = "Qwen3.5-4B"
+        self.model = "Qwen3.8-27B"
         self.stt_endpoint = ""
         self.llm_endpoint = ""
         self.language = ""

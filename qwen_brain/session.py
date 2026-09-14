@@ -1,4 +1,4 @@
-"""Turn policy + live loop: STT commit (or eager pause) → streamed 4B reply."""
+"""Turn policy + live loop: STT commit (or eager pause) → streamed 27B reply."""
 
 from __future__ import annotations
 
@@ -206,7 +206,7 @@ class AssistantSession:
         self.ui.note_sound(event, score=ev.event_score)
 
     def _prompt_for(self, text: str) -> str:
-        # Room noise stays on STATUS. Do not prefix the 4B turn with it.
+        # Room noise stays on STATUS. Do not prefix the 27B turn with it.
         return strip_language_leak(text)
 
     def _clear_event_context(self) -> None:
@@ -240,7 +240,7 @@ class AssistantSession:
         if self._already_shown(ev.utterance_id, prompt):
             return
         # Ambient tags stay on STATUS and attach to the next spoken line.
-        # They must not start a 4B turn of their own.
+        # They must not start a 27B turn of their own.
         return
 
     def _finalize_visible(self, text: str, ev: SttEvent, trigger: str) -> None:
