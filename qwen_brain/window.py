@@ -154,7 +154,7 @@ def _reposition_only(*, fraction: float = 1.0 / 3.0) -> None:
         user32.MoveWindow(hwnd, work.left, work.top, target_w, target_h, True)
 
 
-def apply_light_terminal(title: str = "Qwen brain") -> int:
+def apply_light_terminal(title: str = "brain") -> int:
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.reconfigure(encoding="utf-8", errors="replace")
