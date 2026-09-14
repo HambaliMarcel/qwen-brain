@@ -1,9 +1,9 @@
-"""Future Hermes Agent backend. MVP talks to the 4B llama-server directly.
+"""Future Hermes Agent backend. MVP talks to the 27B llama-server directly.
 
 When Hermes gateway API server is running (localhost:8642), `--backend hermes`
-forwards the committed utterance as a user chat turn so the 4B can drive
+forwards the committed utterance as a user chat turn so the 27B can drive
 agentic tools. Point Hermes `model.base_url` at this project's llama-server
-(`http://127.0.0.1:8080/v1`) so the local 4B is the agent core.
+(`http://127.0.0.1:8080/v1`) so the local 27B is the agent core.
 """
 
 from __future__ import annotations
@@ -79,14 +79,14 @@ class HermesBrain(LlamaBrain):
             body = e.read().decode("utf-8", errors="replace")
             raise LlamaServerError(
                 f"Hermes API {self.base_url} HTTP {e.code}: {body[:800]}. "
-                "Leave --backend llm for the local 4B, or start Hermes gateway."
+                "Leave --backend llm for the local 27B, or start Hermes gateway."
             ) from e
         except URLError as e:
             if gen != self._gen:
                 return
             raise LlamaServerError(
                 f"Hermes API not reachable at {self.base_url}: {e.reason}. "
-                "MVP uses --backend llm (local Qwen3.5-4B)."
+                "MVP uses --backend llm (local Qwen3.8-27B)."
             ) from e
         except OSError:
             if gen != self._gen:
