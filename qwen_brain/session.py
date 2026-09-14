@@ -9,51 +9,72 @@ from typing import Optional
 
 from .bus import SttBusClient
 from .config import BrainConfig
-from .events import SttEvent, is_command_text, same_turn
+from .events import (
+    SttEvent,
+    is_command_text,
+    is_sound_tag,
+    looks_complete,
+    meaningfully_longer,
+    same_turn,
+    should_prompt_sound,
+    with_sound_context,
+)
 from .hermes import make_brain
 from .llm import LlamaBrain, StreamStats
 from .server import fetch_context
 from .tts import NullTts, TtsSink
 from .ui import BrainUI
 
-STUCK_THINKING_SEC = 12.0
+STUCK_THINKING_SEC = 6.0
+STUCK_ANSWER_SEC = 8.0
+STALE_LIVE_SEC = 2.5
+LIVE_STABLE_SEC = 0.10
 
 
 @dataclass
 class TurnPolicy:
-    """Fire the brain as soon as a command is usable.
+    """Fire the brain from live drafts, then revise if ASR grows the line.
 
-    Primary trigger is ASR LAST commit. Eager trigger uses the integrator's
-    silence_sec so the 4B can start ~1s earlier than the official pause.
+    Primary trigger is a live pause (~160ms) or a sentence that already looks
+    complete — not the official LAST seal. Commit still upgrades a truncated
+    eager line. Speculative live starts while the last hop is still decoding.
     """
 
     eager: bool = True
-    eager_silence_sec: float = 0.55
+    eager_silence_sec: float = 0.12
+    revise_extra_chars: int = 8
+    speculative: bool = True
     sent_uid: int = -1
     sent_text: str = ""
     inflight_uid: int = -1
 
     def should_ask(self, ev: SttEvent) -> Optional[str]:
+        if ev.type == "sound":
+            return None
         text = (ev.text or "").strip()
         if not is_command_text(text):
             return None
         uid = ev.utterance_id
         if ev.type == "commit":
             if uid == self.sent_uid and same_turn(self.sent_text, text):
-                if len(text) <= len(self.sent_text) + 2:
+                if not meaningfully_longer(self.sent_text, text, extra=2):
                     return None
-            self.sent_uid = uid
-            self.sent_text = text
-            self.inflight_uid = uid
-            return text
+            return self._accept(uid, text)
         if not self.eager or ev.type != "live":
             return None
-        if ev.speaking or ev.decoding:
-            return None
-        if ev.silence_sec < self.eager_silence_sec:
+        pause = max(float(ev.silence_sec), float(ev.gap_sec))
+        complete = looks_complete(text)
+        if ev.speaking:
+            if not (self.speculative and complete):
+                return None
+        elif pause < self.eager_silence_sec and not complete:
             return None
         if uid == self.sent_uid and same_turn(self.sent_text, text):
-            return None
+            if not meaningfully_longer(self.sent_text, text, extra=self.revise_extra_chars):
+                return None
+        return self._accept(uid, text)
+
+    def _accept(self, uid: int, text: str) -> str:
         self.sent_uid = uid
         self.sent_text = text
         self.inflight_uid = uid
@@ -67,13 +88,25 @@ class AssistantSession:
         self.tts = tts or NullTts()
         self.ui = BrainUI()
         self.ui.ctx_max = int(cfg.ctx)
-        self.policy = TurnPolicy(eager=cfg.eager, eager_silence_sec=cfg.eager_silence_sec)
-        self._gen_lock = threading.Lock()
-        self._gen_thread: Optional[threading.Thread] = None
+        self.policy = TurnPolicy(
+            eager=cfg.eager,
+            eager_silence_sec=cfg.eager_silence_sec,
+            revise_extra_chars=int(getattr(cfg, "eager_revise_chars", 8)),
+        )
         self._latest_prompt = ""
         self._fire_at = 0.0
         self._trigger = ""
         self._stop = threading.Event()
+        self._last_event = ""
+        self._last_event_at = 0.0
+        self._last_stt_at = 0.0
+        self._last_token_at = 0.0
+        self._stable_text = ""
+        self._stable_at = 0.0
+        self._job = 0
+        self._done_job = 0
+        self._sent_sound = ""
+        self._sent_sound_at = 0.0
 
     def run(self) -> int:
         self.ui.backend = self.cfg.backend
@@ -84,12 +117,14 @@ class AssistantSession:
             "Qwen brain",
             f"STT {self.ui.stt_endpoint}  ·  LLM {self.ui.llm_endpoint}  ·  {self.cfg.backend}",
         )
-        self._refresh_context()
+        threading.Thread(target=self._refresh_context, name="brain-ctx", daemon=True).start()
         threading.Thread(target=self._watchdog, name="brain-watchdog", daemon=True).start()
+        threading.Thread(target=self._worker, name="brain-worker", daemon=True).start()
         client = SttBusClient(
             self.cfg.stt_host,
             self.cfg.stt_port,
             on_status=self.ui.note_bus,
+            on_idle=self.ui.heartbeat,
         )
         try:
             for ev in client.iter_events():
@@ -101,23 +136,90 @@ class AssistantSession:
             self.tts.cancel()
         finally:
             self._stop.set()
+            self.brain.cancel()
             client.stop()
             self.ui.close()
         return 0
 
     def _watchdog(self) -> None:
-        while not self._stop.wait(0.5):
-            if self.ui.status != "THINKING":
+        while not self._stop.wait(0.25):
+            now = monotonic()
+            self.ui.heartbeat()
+            if self._last_stt_at and (now - self._last_stt_at) > STALE_LIVE_SEC:
+                if self.ui.status not in {"THINKING", "ANSWERING"} and self.ui.live:
+                    self.ui.set_live("")
+            thinking = self.ui.status == "THINKING" and self._fire_at > 0
+            answering = self.ui.status == "ANSWERING" and self._fire_at > 0
+            if thinking and (now - self._fire_at) >= STUCK_THINKING_SEC:
+                self._reset_stuck(f"thinking >{int(STUCK_THINKING_SEC)}s, reset")
+            elif answering:
+                last_tok = self._last_token_at or self._fire_at
+                if (now - last_tok) >= STUCK_ANSWER_SEC:
+                    self._reset_stuck(f"answer stalled >{int(STUCK_ANSWER_SEC)}s, reset")
+
+    def _reset_stuck(self, msg: str) -> None:
+        self.brain.cancel()
+        self.tts.cancel()
+        self.policy.inflight_uid = -1
+        self._job += 1
+        self._fire_at = 0.0
+        self.ui.note_stuck(msg)
+
+    def _worker(self) -> None:
+        while not self._stop.is_set():
+            job = self._job
+            prompt = self._latest_prompt
+            trigger = self._trigger
+            if job == self._done_job or not prompt:
+                self._stop.wait(0.012)
                 continue
-            if self._fire_at <= 0:
-                continue
-            if (monotonic() - self._fire_at) < STUCK_THINKING_SEC:
-                continue
-            self.brain.cancel()
-            self.tts.cancel()
-            self.policy.inflight_uid = -1
-            self.ui.note_stuck(f"thinking >{int(STUCK_THINKING_SEC)}s, reset")
-            self._fire_at = 0.0
+            self._execute(prompt, trigger, job)
+            if self._job == job:
+                self._done_job = job
+
+    def _note_sound(self, ev: SttEvent) -> None:
+        event = (ev.event or "").strip().strip("[]")
+        if not event:
+            return
+        self._last_event = event
+        self._last_event_at = monotonic()
+        self.ui.note_sound(event, score=ev.event_score)
+
+    def _maybe_send_sound(self, ev: SttEvent) -> None:
+        tag = (ev.event or "").strip().strip("[]")
+        if not should_prompt_sound(
+            tag, companion=ev.companion, non_speech_only=ev.non_speech_only
+        ):
+            return
+        now = monotonic()
+        if tag == self._sent_sound and (now - self._sent_sound_at) < 8.0:
+            return
+        if self.ui.status in {"THINKING", "ANSWERING"}:
+            return
+        self._sent_sound = tag
+        self._sent_sound_at = now
+        self._start_reply(f"[{tag}]", "sound")
+
+    def _live_display(self, ev: SttEvent) -> str:
+        shown = (ev.display or ev.text or "").strip()
+        event = (ev.event or self._last_event or "").strip()
+        if event:
+            return with_sound_context(shown or ev.text, event)
+        return shown
+
+    def _prompt_for(self, text: str) -> str:
+        event = self.ui.event_label or self._last_event
+        fresh = self._last_event_at and (monotonic() - self._last_event_at) < 6.0
+        if event and fresh:
+            return with_sound_context(text, event)
+        return text
+
+    def _trigger_name(self, ev: SttEvent) -> str:
+        if ev.type == "commit":
+            return "commit"
+        if ev.speaking:
+            return "live"
+        return "eager"
 
     def _refresh_context(self) -> None:
         if self.cfg.backend != "llm":
@@ -141,6 +243,7 @@ class AssistantSession:
         return not same_turn(self.policy.sent_text, live)
 
     def _on_event(self, ev: SttEvent) -> None:
+        self._last_stt_at = monotonic()
         m = self.ui.metrics
         m.utterance_id = ev.utterance_id
         m.silence_sec = ev.silence_sec
@@ -149,13 +252,30 @@ class AssistantSession:
         if ev.language:
             m.last_language = ev.language
             self.ui.language = ev.language
+        if ev.event:
+            m.last_event = ev.event
+            self._note_sound(ev)
+        elif ev.display:
+            if is_sound_tag(ev.display) or is_sound_tag(ev.text):
+                inner = (ev.display or ev.text).strip()[1:-1].strip()
+                if inner:
+                    ev.event = inner
+                    m.last_event = inner
+                    self._note_sound(ev)
+        live_text = (ev.text or "").strip()
+        if ev.type == "live" and live_text != self._stable_text:
+            self._stable_text = live_text
+            self._stable_at = monotonic()
         busy = self.ui.status in {"THINKING", "ANSWERING"}
+        if ev.type in {"live", "sound", "commit"}:
+            self.ui.set_live(self._live_display(ev))
         if ev.type == "live":
-            self.ui.set_live(ev.text)
             if ev.speaking and self._should_barge(ev):
                 self.brain.cancel()
                 self.tts.cancel()
                 self.policy.inflight_uid = -1
+                self._job += 1
+                self._fire_at = 0.0
                 self.ui.note_cut("barge-in")
             elif not busy:
                 if ev.speaking:
@@ -164,24 +284,39 @@ class AssistantSession:
                     self.ui.set_status("LISTENING", "STT decoding")
                 else:
                     self.ui.set_status("LISTENING", ev.language or "ears on")
-            else:
-                self.ui._paint_header()
-        elif ev.type == "commit":
-            self.ui.set_live(ev.text)
+        event_only = (
+            (bool(ev.event) or is_sound_tag(live_text) or is_sound_tag(ev.display))
+            and not is_command_text(live_text)
+        )
+        if event_only and ev.type in {"live", "sound"} and not busy:
+            if not ev.event:
+                ev.event = live_text.strip().strip("[]") or ev.display.strip().strip("[]")
+            self._maybe_send_sound(ev)
+            return
+        if ev.type == "live" and ev.speaking and looks_complete(live_text):
+            if (monotonic() - self._stable_at) < LIVE_STABLE_SEC:
+                return
         prompt = self.policy.should_ask(ev)
         if prompt:
-            trigger = "commit" if ev.type == "commit" else "eager"
-            self._start_reply(prompt, trigger)
+            self._sent_sound = ""
+            self._start_reply(self._prompt_for(prompt), self._trigger_name(ev))
 
     def _start_reply(self, prompt: str, trigger: str) -> None:
         self._latest_prompt = prompt
         self._trigger = trigger
         self._fire_at = monotonic()
+        self._last_token_at = 0.0
+        self._job += 1
         self.brain.cancel()
         self.tts.cancel()
+        if trigger == "sound" and self.policy.inflight_uid < 0:
+            uid = int(self.ui.metrics.utterance_id)
+            self.policy.inflight_uid = uid
+            self.policy.sent_uid = uid
+            self.policy.sent_text = prompt
         self.ui.trigger = trigger
+        self.ui.brain = ""
         self.ui.set_you(prompt)
-        self.ui.set_brain("")
         self.ui.ttft_ms = 0.0
         self.ui.total_ms = 0.0
         self.ui.decode_ms = 0.0
@@ -189,51 +324,52 @@ class AssistantSession:
         self.ui.tok_s = 0.0
         self.ui.set_status("THINKING", f"{trigger} · first token…")
 
-        def run() -> None:
-            with self._gen_lock:
-                if prompt != self._latest_prompt:
-                    return
-                acc: list[str] = []
+    def _execute(self, prompt: str, trigger: str, job: int) -> None:
+        if job != self._job:
+            return
+        acc: list[str] = []
 
-                def on_token(delta: str, stats: StreamStats) -> None:
-                    acc.append(delta)
-                    self.tts.on_token(delta)
-                    e2e = (monotonic() - self._fire_at) * 1000.0
-                    self.ui.on_stream(delta, stats, e2e_ms=e2e)
+        def on_token(delta: str, stats: StreamStats) -> None:
+            if job != self._job:
+                return
+            acc.append(delta)
+            self._last_token_at = monotonic()
+            self.tts.on_token(delta)
+            e2e = (monotonic() - self._fire_at) * 1000.0
+            self.ui.on_stream(delta, stats, e2e_ms=e2e)
 
-                try:
-                    text, stats = self.brain.ask(prompt, on_token=on_token)
-                except Exception as e:
-                    self.ui.note_error(str(e))
-                    self.ui.set_status("LISTENING", "error")
-                    self.policy.inflight_uid = -1
-                    self._fire_at = 0.0
-                    return
-                if prompt != self._latest_prompt:
-                    return
-                e2e = (monotonic() - self._fire_at) * 1000.0
-                self.ui.metrics.record_turn(
-                    trigger=trigger,
-                    ttft_ms=stats.first_token_ms,
-                    gen_ms=stats.total_ms,
-                    e2e_ms=e2e,
-                    tok_s=stats.tok_s,
-                    cancelled=stats.cancelled,
-                )
-                if text and not acc:
-                    self.ui.set_brain(text)
-                self.ui.note_reply(text, stats, e2e_ms=e2e, trigger=trigger)
-                self._refresh_context()
-                self.tts.flush()
-                self.policy.inflight_uid = -1
-                self._fire_at = 0.0
-                if stats.cancelled:
-                    self.ui.set_status("LISTENING", "cancelled")
-                else:
-                    self.ui.set_status(
-                        "LISTENING",
-                        f"ttft {stats.first_token_ms:.0f}ms  {stats.tok_s:.0f} tok/s",
-                    )
-
-        self._gen_thread = threading.Thread(target=run, name="brain-reply", daemon=True)
-        self._gen_thread.start()
+        try:
+            text, stats = self.brain.ask(prompt, on_token=on_token)
+        except Exception as e:
+            if job != self._job:
+                return
+            self.ui.note_error(str(e))
+            self.ui.set_status("LISTENING", "error")
+            self.policy.inflight_uid = -1
+            self._fire_at = 0.0
+            return
+        if job != self._job:
+            return
+        e2e = (monotonic() - self._fire_at) * 1000.0
+        self.ui.metrics.record_turn(
+            trigger=trigger,
+            ttft_ms=stats.first_token_ms,
+            gen_ms=stats.total_ms,
+            e2e_ms=e2e,
+            tok_s=stats.tok_s,
+            cancelled=stats.cancelled,
+        )
+        if text and not acc:
+            self.ui.set_brain(text)
+        self.ui.note_reply(text, stats, e2e_ms=e2e, trigger=trigger)
+        threading.Thread(target=self._refresh_context, name="brain-ctx", daemon=True).start()
+        self.tts.flush()
+        self.policy.inflight_uid = -1
+        self._fire_at = 0.0
+        if stats.cancelled:
+            self.ui.set_status("LISTENING", "cancelled")
+        else:
+            self.ui.set_status(
+                "LISTENING",
+                f"ttft {stats.first_token_ms:.0f}ms  {stats.tok_s:.0f} tok/s",
+            )
