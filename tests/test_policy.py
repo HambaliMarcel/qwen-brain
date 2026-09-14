@@ -6,8 +6,10 @@ from qwen_brain.config import BrainConfig
 from qwen_brain.events import (
     SttEvent,
     is_command_text,
+    looks_complete,
     parse_event,
     same_turn,
+    strip_language_leak,
     with_sound_context,
 )
 from qwen_brain.llm import LlamaBrain, split_think_stream, strip_think
@@ -40,7 +42,9 @@ class EventTests(unittest.TestCase):
         self.assertFalse(is_command_text(""))
         self.assertFalse(is_command_text("[musik]"))
         self.assertFalse(is_command_text("[finger snapping]"))
-        self.assertFalse(is_command_text("um"))
+        self.assertFalse(is_command_text("language Canton"))
+        self.assertFalse(is_command_text("[suara non-bicara?]"))
+        self.assertEqual(strip_language_leak("language Canton 唔該"), "唔該")
         self.assertEqual(
             with_sound_context("halo pak", "finger snapping"),
             "[finger snapping] halo pak",
@@ -50,6 +54,7 @@ class EventTests(unittest.TestCase):
 
     def test_same_turn(self):
         self.assertTrue(same_turn("jam berapa", "jam berapa sekarang"))
+        self.assertTrue(same_turn("[batuk?] apa kabar", "apa kabar"))
         self.assertFalse(same_turn("jam berapa", "buka notepad"))
 
 
@@ -108,46 +113,85 @@ class TurnPolicyTests(unittest.TestCase):
         out = p.should_ask(
             ev(
                 type="live",
-                text="jam berapa",
+                text="jam berapa sekarang ya?",
                 speaking=False,
                 decoding=False,
                 silence_sec=0.6,
                 utterance_id=4,
             )
         )
-        self.assertEqual(out, "jam berapa")
+        self.assertEqual(out, "jam berapa sekarang ya?")
+
+    def test_incomplete_draft_does_not_fire_on_short_pause(self):
+        p = TurnPolicy(eager=True, eager_silence_sec=0.45)
+        out = p.should_ask(
+            ev(
+                type="live",
+                text="I'm not",
+                speaking=False,
+                silence_sec=0.5,
+                gap_sec=2.0,
+                utterance_id=4,
+            )
+        )
+        self.assertIsNone(out)
+
+    def test_incomplete_draft_fires_after_hold(self):
+        p = TurnPolicy(eager=True, eager_silence_sec=0.45, hold_silence_sec=0.9)
+        out = p.should_ask(
+            ev(
+                type="live",
+                text="I'm not",
+                speaking=False,
+                silence_sec=0.95,
+                utterance_id=4,
+            )
+        )
+        self.assertEqual(out, "I'm not")
 
     def test_commit_after_eager_same_text_skipped(self):
         p = TurnPolicy(eager=True, eager_silence_sec=0.5)
         p.should_ask(
-            ev(type="live", text="jam berapa", speaking=False, silence_sec=0.7, utterance_id=4)
+            ev(
+                type="live",
+                text="jam berapa sekarang ya?",
+                speaking=False,
+                silence_sec=0.7,
+                utterance_id=4,
+            )
         )
-        out = p.should_ask(ev(type="commit", text="jam berapa", utterance_id=4))
+        out = p.should_ask(ev(type="commit", text="jam berapa sekarang ya?", utterance_id=4))
         self.assertIsNone(out)
 
     def test_commit_longer_text_restarts(self):
         p = TurnPolicy(eager=True, eager_silence_sec=0.5)
         p.should_ask(
-            ev(type="live", text="jam berapa", speaking=False, silence_sec=0.7, utterance_id=4)
-        )
-        out = p.should_ask(ev(type="commit", text="jam berapa sekarang", utterance_id=4))
-        self.assertEqual(out, "jam berapa sekarang")
-
-    def test_eager_fires_while_decoding(self):
-        p = TurnPolicy(eager=True, eager_silence_sec=0.16)
-        out = p.should_ask(
             ev(
                 type="live",
-                text="jam berapa",
+                text="jam berapa sekarang ya?",
                 speaking=False,
-                decoding=True,
-                silence_sec=0.2,
+                silence_sec=0.7,
                 utterance_id=4,
             )
         )
-        self.assertEqual(out, "jam berapa")
+        out = p.should_ask(ev(type="commit", text="jam berapa sekarang ya ini", utterance_id=4))
+        self.assertEqual(out, "jam berapa sekarang ya ini")
 
-    def test_speculative_live_complete_while_speaking(self):
+    def test_decoding_does_not_fire_a_complete_line(self):
+        p = TurnPolicy(eager=True, eager_silence_sec=0.45)
+        out = p.should_ask(
+            ev(
+                type="live",
+                text="jam berapa sekarang ya?",
+                speaking=False,
+                decoding=True,
+                silence_sec=0.6,
+                utterance_id=4,
+            )
+        )
+        self.assertIsNone(out)
+
+    def test_speculative_live_does_not_fire_while_speaking(self):
         p = TurnPolicy(eager=True, eager_silence_sec=0.16)
         out = p.should_ask(
             ev(
@@ -158,23 +202,29 @@ class TurnPolicyTests(unittest.TestCase):
                 utterance_id=5,
             )
         )
-        self.assertEqual(out, "jam berapa sekarang ya?")
+        self.assertIsNone(out)
 
     def test_live_revision_on_longer_draft(self):
         p = TurnPolicy(eager=True, eager_silence_sec=0.16, revise_extra_chars=8)
         first = p.should_ask(
-            ev(type="live", text="oke jadi ini bag", speaking=False, silence_sec=0.2, utterance_id=6)
+            ev(
+                type="live",
+                text="oke jadi ini bagus sekali",
+                speaking=False,
+                silence_sec=0.5,
+                utterance_id=6,
+            )
         )
         again = p.should_ask(
             ev(
                 type="live",
                 text="oke jadi ini bagus atau enggak ya",
                 speaking=False,
-                silence_sec=0.2,
+                silence_sec=0.5,
                 utterance_id=6,
             )
         )
-        self.assertEqual(first, "oke jadi ini bag")
+        self.assertEqual(first, "oke jadi ini bagus sekali")
         self.assertEqual(again, "oke jadi ini bagus atau enggak ya")
 
     def test_sound_event_does_not_ask(self):
@@ -183,6 +233,18 @@ class TurnPolicyTests(unittest.TestCase):
             ev(type="sound", text="[finger snapping]", event="finger snapping", utterance_id=7)
         )
         self.assertIsNone(out)
+
+
+class CompletenessTests(unittest.TestCase):
+    def test_fragments_are_not_complete(self):
+        self.assertFalse(looks_complete("I'm not"))
+        self.assertFalse(looks_complete("mas"))
+        self.assertFalse(looks_complete("masih makan"))
+
+    def test_finished_lines_are_complete(self):
+        self.assertTrue(looks_complete("jam berapa sekarang ya?"))
+        self.assertTrue(looks_complete("oke jadi ini bagus sekali"))
+        self.assertTrue(looks_complete("唔該，啲咩事啊"))
 
 
 if __name__ == "__main__":
