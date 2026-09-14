@@ -14,7 +14,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from .config import BrainConfig
-from .llm import LlamaBrain
+from .llm import LlamaBrain, apply_llama_timings
 from .server import LlamaServerError
 
 
@@ -25,7 +25,7 @@ class HermesBrain(LlamaBrain):
         super().__init__(cfg)
         self.base_url = (cfg.hermes_api or "http://127.0.0.1:8642").rstrip("/")
 
-    def _stream(self, messages: list[dict], gen: int = 0) -> Iterator[str]:
+    def _stream(self, messages: list[dict], gen: int = 0, stats=None) -> Iterator[str]:
         payload = {
             "messages": messages,
             "temperature": self.cfg.temperature,
@@ -62,6 +62,8 @@ class HermesBrain(LlamaBrain):
                             evt = json.loads(payload_s)
                         except json.JSONDecodeError:
                             continue
+                        if stats is not None:
+                            apply_llama_timings(stats, evt)
                         choices = evt.get("choices") or []
                         if not choices:
                             continue
