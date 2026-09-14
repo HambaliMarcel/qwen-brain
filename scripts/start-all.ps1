@@ -115,7 +115,7 @@ if ($IntegratorArgs -and $IntegratorArgs.Count -gt 0) {
     $flags = @($IntegratorArgs)
 }
 if ($flags -notcontains "--profile") {
-    $flags = @("--profile", "ultralow") + $flags
+    $flags = @("--profile", "auto") + $flags
 }
 if ($flags -notcontains "--max-tokens") {
     $flags += @("--max-tokens", "32")
@@ -128,6 +128,12 @@ if ($flags -notcontains "--unfixed-tokens") {
 }
 if ($flags -notcontains "--pann-interval") {
     $flags += @("--pann-interval", "0.45")
+}
+if ($flags -notcontains "--language") {
+    $flags += @("--language", "mix")
+}
+if (($flags -notcontains "--lid-lock") -and ($flags -notcontains "--no-lid-lock")) {
+    $flags += "--no-lid-lock"
 }
 
 Write-Host "Qwen stack  one-shot"
