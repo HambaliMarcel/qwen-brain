@@ -30,7 +30,7 @@ Two llama-server processes share the GPU: ASR 1.7B on 9999, chat 4B on 8080. Lea
 
 ## Run (MVP)
 
-One command starts ASR server, 4B server, live STT bus, and the brain dashboard. Extra windows open for the GPU servers and the mic; this window stays on **LIVE / YOU / BRAIN**. Already-running ports are reused.
+One command starts ASR server, 4B server, live STT bus, and the brain dashboard. Extra windows open for the GPU servers and the mic; this window stays on **YOU / BRAIN / LAT**. Already-running ports are reused.
 
 ```powershell
 cd C:\Users\marce\Projects\qwen-brain
@@ -54,7 +54,7 @@ Ctrl+C in the dashboard stops **listen** only (GPU servers stay warm). Use `Stop
 
 Manual four-terminal commands are still in `scripts\` if you need them. Same mic flags as `python -m qwen3_asr_stream mic` (`--profile ultralow`, `--device`, …) pass through `start-all.ps1`.
 
-Dashboard: sticky **STATUS** header, then Cindy-style turns: **YOU** (yellow live draft + black words sent to the 4B) / **BRAIN** (blue answer) / **YOU** / **BRAIN**. **LAT** is always the last row and rewrites in place. PANN tags such as `[batuk?]` show on YOU and are sent to the 4B; ambient tags like `[typing]` stay on YOU as scene context.
+Dashboard: sticky **STATUS** header, then Cindy-style finalized **YOU** (black settled transcript) / **BRAIN** (blue answer) turns, with the latest **LAT** pinned at the bottom. Draft ASR text and provisional 4B answers remain hidden. The normal Windows Terminal buffer and a scrolling log region preserve mouse-wheel and PageUp/PageDown history. PANN tags are attached to the next spoken YOU turn as scene context; a tag by itself never triggers an answer.
 
 Typed debug (no mic):
 
@@ -66,17 +66,19 @@ python -m qwen_brain chat --start-server
 
 The brain starts from **live STT**, using official Qwen streaming knobs:
 
-1. **ASR hop** — `ultralow` 400ms chunks, official `unfixed_chunk_num=2` / `unfixed_token_num=5`, `max_tokens=32` per hop (Qwen3-ASR streaming example).
-2. **Speculative live** — a draft that already looks complete starts the 4B after ~100ms of stable text, in parallel with the last ASR decode.
+1. **ASR hop** — adaptive `auto` starts at 600ms with official `unfixed_chunk_num=2` / `unfixed_token_num=5`, `max_tokens=32` per hop. This remains responsive while giving multilingual LID more audio than the English-heavy 400ms ultralow profile.
+2. **Speculative live** — a draft that already looks complete starts the 4B after ~100ms of stable text, in parallel with the last ASR decode. This provisional work is not displayed or added to chat history.
 3. **Eager pause** — `silence_sec`/`gap_sec` ≥ **0.12s**. Does **not** wait for ASR `decoding=false`.
-4. **Live revision** — if the line grows by ~8+ characters, the HTTP stream is **aborted** so the GPU slot is freed, then the fuller line is sent.
-5. **Official commit** — ASR LAST seal. Skipped if eager already sent the same line.
+4. **Live revision** — if the line grows by ~8+ characters, the HTTP stream is **aborted** so the GPU slot is freed, then the fuller line is generated provisionally.
+5. **Settled LAST** — the bus waits for the full-utterance ASR refinement. If it matches the speculative draft, the ready answer is promoted instantly; if it changed, only the corrected final transcript is regenerated and shown.
 
 Qwen3.5-4B sampling follows the non-thinking recipe (`temp 0.7`, `top_p 0.8`, `top_k 20`, `enable_thinking: false`, `reasoning_budget 0`). KV cache is Q8 to leave VRAM for bf16 ASR. Cancelled streams close the socket immediately so the dashboard cannot sit in THINKING behind a queued llama request.
 
 PANN / ASR sound tags are `type=sound` on the bus. Replies cap at 120 tokens. A new utterance barges in.
 
 The dashboard heartbeats while the bus is idle, resets THINKING after 6s / stalled answers after 8s, and does not flip back to WAITING on a bus keepalive.
+
+Multilingual sessions default to Qwen3-ASR auto detection (`--language mix --no-lid-lock`). For a known monolingual session, an explicit model-supported language gives the strongest short-phrase accuracy without changing the default, for example `.\Start.bat --language Arabic` or `.\Start.bat --language Spanish`.
 
 ## Hermes (next, not MVP)
 
