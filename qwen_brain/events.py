@@ -29,10 +29,14 @@ def parse_event(line: str) -> dict[str, Any]:
     return data
 
 
+_COMPLETE_END = set("?!。.？！…")
+
+
 @dataclass
 class SttEvent:
     type: str
     text: str = ""
+    display: str = ""
     language: str = ""
     speaking: bool = False
     decoding: bool = False
@@ -40,13 +44,19 @@ class SttEvent:
     gap_sec: float = 0.0
     silence_sec: float = 0.0
     ts: float = 0.0
+    event: str = ""
+    event_score: float = 0.0
+    companion: bool = False
+    non_speech_only: bool = False
     raw: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "SttEvent":
+        text = str(data.get("text") or "")
         return cls(
             type=str(data.get("type") or ""),
-            text=str(data.get("text") or ""),
+            text=text,
+            display=str(data.get("display") or text),
             language=str(data.get("language") or ""),
             speaking=bool(data.get("speaking")),
             decoding=bool(data.get("decoding")),
@@ -54,20 +64,77 @@ class SttEvent:
             gap_sec=float(data.get("gap_sec") or 0.0),
             silence_sec=float(data.get("silence_sec") or 0.0),
             ts=float(data.get("ts") or 0.0),
+            event=str(data.get("event") or ""),
+            event_score=float(data.get("event_score") or 0.0),
+            companion=bool(data.get("companion")),
+            non_speech_only=bool(data.get("non_speech_only")),
             raw=data,
         )
 
 
+def is_sound_tag(text: str) -> bool:
+    t = (text or "").strip()
+    return bool(t) and t.startswith("[") and t.endswith("]") and "[" not in t[1:-1]
+
+
 def is_command_text(text: str) -> bool:
     t = (text or "").strip()
-    if not t:
-        return False
-    if t.startswith("[") and t.endswith("]") and " " not in t.strip("[]"):
+    if not t or is_sound_tag(t):
         return False
     lowered = t.lower().strip(" .!?，。！？")
     if lowered in {"uh", "um", "erm", "hmm", "ah", "eh", "oh", "ha", "haha"}:
         return False
     return any(ch.isalnum() for ch in t)
+
+
+def looks_complete(text: str) -> bool:
+    """True when a live draft already looks like a finished command."""
+    t = (text or "").strip()
+    if len(t) < 8:
+        return False
+    if t[-1] in _COMPLETE_END:
+        return True
+    return len(t.split()) >= 5
+
+
+_AMBIENT_EVENTS = {"typing", "keyboard", "keystrokes", "clicking", "mouse"}
+
+
+def with_sound_context(text: str, event: str) -> str:
+    body = (text or "").strip()
+    ev = (event or "").strip().strip("[]")
+    if not ev:
+        return body
+    tag = f"[{ev}]"
+    if not body:
+        return tag
+    if body.lower().startswith(tag.lower()):
+        return body
+    return f"{tag} {body}"
+
+
+def should_prompt_sound(event: str, *, companion: bool = False, non_speech_only: bool = False) -> bool:
+    """True when a PANN/ASR tag should be sent as its own user turn."""
+    tag = (event or "").strip().strip("[]")
+    if not tag:
+        return False
+    if tag.lower() in _AMBIENT_EVENTS:
+        return False
+    if companion and not non_speech_only:
+        return False
+    return True
+
+
+def meaningfully_longer(prev: Optional[str], new: str, extra: int = 8) -> bool:
+    a = (prev or "").strip()
+    b = (new or "").strip()
+    if not b:
+        return False
+    if not a:
+        return True
+    if not same_turn(a, b):
+        return False
+    return len(b) >= len(a) + extra
 
 
 def same_turn(prev: Optional[str], new: str) -> bool:
