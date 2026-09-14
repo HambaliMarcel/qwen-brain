@@ -97,9 +97,6 @@ def looks_complete(text: str) -> bool:
     return len(t.split()) >= 5
 
 
-_AMBIENT_EVENTS = {"typing", "keyboard", "keystrokes", "clicking", "mouse"}
-
-
 def with_sound_context(text: str, event: str) -> str:
     body = (text or "").strip()
     ev = (event or "").strip().strip("[]")
@@ -111,18 +108,6 @@ def with_sound_context(text: str, event: str) -> str:
     if body.lower().startswith(tag.lower()):
         return body
     return f"{tag} {body}"
-
-
-def should_prompt_sound(event: str, *, companion: bool = False, non_speech_only: bool = False) -> bool:
-    """True when a PANN/ASR tag should be sent as its own user turn."""
-    tag = (event or "").strip().strip("[]")
-    if not tag:
-        return False
-    if tag.lower() in _AMBIENT_EVENTS:
-        return False
-    if companion and not non_speech_only:
-        return False
-    return True
 
 
 def meaningfully_longer(prev: Optional[str], new: str, extra: int = 8) -> bool:
