@@ -19,7 +19,7 @@ Later: same 4B becomes the Hermes Agent core (`--backend hermes`), then TTS.
 | This repo | `C:\Users\marce\Projects\qwen-brain` |
 | ASR repo | `C:\Users\marce\Projects\qwen3-asr-stream` |
 | Brain GGUF | `C:\AI\models\Qwen3.5-4B-Q8_0.gguf` |
-| ASR GGUF | `C:\AI\models\Qwen3-ASR-1.7B-Q8_0.gguf` |
+| ASR GGUF | `C:\AI\models\Qwen3-ASR-1.7B-bf16.gguf` (mmproj stays Q8_0) |
 | llama-server | `C:\AI\llama.cpp\llama-server.exe` |
 | ASR HTTP | `127.0.0.1:9999` |
 | Brain HTTP | `127.0.0.1:8080` |
@@ -54,7 +54,7 @@ Ctrl+C in the dashboard stops **listen** only (GPU servers stay warm). Use `Stop
 
 Manual four-terminal commands are still in `scripts\` if you need them. Same mic flags as `python -m qwen3_asr_stream mic` (`--profile ultralow`, `--device`, …) pass through `start-all.ps1`.
 
-Dashboard: **LIVE** = STT draft, **YOU** = command, **BRAIN** = streamed tokens. The window snaps to the left third of the screen like Cindy. STATUS shows mode, ttft, generation time, tok/s, e2e, prefill, token counts, and rolling averages. LOG stamps YOU / BRAIN / LAT / CUT / BUS / MODE.
+Dashboard: sticky **STATUS** header, then Cindy-style turns: **YOU** (yellow live draft + black words sent to the 4B) / **BRAIN** (blue answer) / **YOU** / **BRAIN**. **LAT** is always the last row and rewrites in place. PANN tags such as `[batuk?]` show on YOU and are sent to the 4B; ambient tags like `[typing]` stay on YOU as scene context.
 
 Typed debug (no mic):
 
@@ -64,12 +64,19 @@ python -m qwen_brain chat --start-server
 
 ## Latency
 
-The brain does **not** wait for ASR LAST seal. It starts on:
+The brain starts from **live STT**, using official Qwen streaming knobs:
 
-1. **Eager pause** — `silence_sec >= 0.55` on a live lexical line (about a second before official commit).
-2. **Official commit** — ASR LAST draft. Skipped if eager already sent the same line; restarted if LAST grew.
+1. **ASR hop** — `ultralow` 400ms chunks, official `unfixed_chunk_num=2` / `unfixed_token_num=5`, `max_tokens=32` per hop (Qwen3-ASR streaming example).
+2. **Speculative live** — a draft that already looks complete starts the 4B after ~100ms of stable text, in parallel with the last ASR decode.
+3. **Eager pause** — `silence_sec`/`gap_sec` ≥ **0.12s**. Does **not** wait for ASR `decoding=false`.
+4. **Live revision** — if the line grows by ~8+ characters, the HTTP stream is **aborted** so the GPU slot is freed, then the fuller line is sent.
+5. **Official commit** — ASR LAST seal. Skipped if eager already sent the same line.
 
-Thinking mode is forced off (`enable_thinking: false`). Replies are capped at 160 tokens. New speech cancels an in-flight reply (barge-in).
+Qwen3.5-4B sampling follows the non-thinking recipe (`temp 0.7`, `top_p 0.8`, `top_k 20`, `enable_thinking: false`, `reasoning_budget 0`). KV cache is Q8 to leave VRAM for bf16 ASR. Cancelled streams close the socket immediately so the dashboard cannot sit in THINKING behind a queued llama request.
+
+PANN / ASR sound tags are `type=sound` on the bus. Replies cap at 120 tokens. A new utterance barges in.
+
+The dashboard heartbeats while the bus is idle, resets THINKING after 6s / stalled answers after 8s, and does not flip back to WAITING on a bus keepalive.
 
 ## Hermes (next, not MVP)
 
