@@ -54,7 +54,7 @@ Ctrl+C in the dashboard stops **listen** only (GPU servers stay warm). Use `Stop
 
 Manual four-terminal commands are still in `scripts\` if you need them. Same mic flags as `python -m qwen3_asr_stream mic` (`--profile ultralow`, `--device`, …) pass through `start-all.ps1`.
 
-Dashboard: sticky **STATUS** header, then Cindy-style finalized **YOU** (black settled transcript) / **BRAIN** (blue answer) turns, with the latest **LAT** pinned at the bottom. Draft ASR text and provisional 4B answers remain hidden. The normal Windows Terminal buffer and a scrolling log region preserve mouse-wheel and PageUp/PageDown history. PANN tags are attached to the next spoken YOU turn as scene context; a tag by itself never triggers an answer.
+Dashboard: sticky **STATUS** header, then Cindy-style finalized **YOU** / **BRAIN** turns only, with **LAT** pinned at the bottom. Live drafts stay hidden. Room noise (`[batuk?]`, `[crowing]`, `[typing]`) stays on STATUS and does not start a 4B turn. Spoken words finalize when the utterance is actually finished: a complete line after a short silence, or an incomplete line after a real hold / LAST — never on an 80 ms syllable gap. The 4B answers calmly from the last five turns, without repeating a question you already answered.
 
 Typed debug (no mic):
 
@@ -64,21 +64,21 @@ python -m qwen_brain chat --start-server
 
 ## Latency
 
-The brain starts from **live STT**, using official Qwen streaming knobs:
+The brain starts from **live STT**, using official Qwen3-ASR mix streaming:
 
-1. **ASR hop** — adaptive `auto` starts at 600ms with official `unfixed_chunk_num=2` / `unfixed_token_num=5`, `max_tokens=32` per hop. This remains responsive while giving multilingual LID more audio than the English-heavy 400ms ultralow profile.
-2. **Speculative live** — a draft that already looks complete starts the 4B after ~100ms of stable text, in parallel with the last ASR decode. This provisional work is not displayed or added to chat history.
-3. **Eager pause** — `silence_sec`/`gap_sec` ≥ **0.12s**. Does **not** wait for ASR `decoding=false`.
-4. **Live revision** — if the line grows by ~8+ characters, the HTTP stream is **aborted** so the GPU slot is freed, then the fuller line is generated provisionally.
-5. **Settled LAST** — the bus waits for the full-utterance ASR refinement. If it matches the speculative draft, the ready answer is promoted instantly; if it changed, only the corrected final transcript is regenerated and shown.
+1. **ASR hop** — default **500ms** (`--no-auto-tune`), matching the official streaming example's smallest step. Mix mode uses `language=None` (no `force_language`). Continuation prefills the **model's own** `language X` tag, not an Indonesian/English lexicon guess.
+2. **First decode** — `--min-audio 0.40` so the first hop has enough audio for LID.
+3. **Endpoint** — a finished sentence may send after ~450ms of **silence**. Incomplete drafts wait until ~900ms of silence or LAST. Syllable `gap_sec` is ignored. Hidden speculation only runs while you are still talking a complete line.
+4. **Shared GPU** — `--no-refine` so ASR does not start a second full decode that blocks the 4B. Replies stay short (`max_tokens` 48).
+5. **LAST** — still upgrades a truncated eager line; it is not required if the utterance already ended cleanly.
 
-Qwen3.5-4B sampling follows the non-thinking recipe (`temp 0.7`, `top_p 0.8`, `top_k 20`, `enable_thinking: false`, `reasoning_budget 0`). KV cache is Q8 to leave VRAM for bf16 ASR. Cancelled streams close the socket immediately so the dashboard cannot sit in THINKING behind a queued llama request.
+Qwen3.5-4B sampling is the stock non-thinking recipe (`temp 0.7`, `top_p 0.85`, `top_k 20`, `enable_thinking: false`, `reasoning_budget 0`) so replies stay short and calm. History keeps the last **5** user/assistant turns. KV cache is Q8 to leave VRAM for bf16 ASR. Cancelled streams close the socket immediately so the dashboard cannot sit in THINKING behind a queued llama request.
 
-PANN / ASR sound tags are `type=sound` on the bus. Replies cap at 120 tokens. A new utterance barges in.
+PANN / ASR sound tags are `type=sound` for STATUS only. They are not committed as YOU lines. A new spoken utterance barges in.
 
 The dashboard heartbeats while the bus is idle, resets THINKING after 6s / stalled answers after 8s, and does not flip back to WAITING on a bus keepalive.
 
-Multilingual sessions default to Qwen3-ASR auto detection (`--language mix --no-lid-lock`). For a known monolingual session, an explicit model-supported language gives the strongest short-phrase accuracy without changing the default, for example `.\Start.bat --language Arabic` or `.\Start.bat --language Spanish`.
+Multilingual sessions default to Qwen3-ASR automatic LID (`--language mix --no-lid-lock`). Do not force Indonesian or English unless the session is truly monolingual. For a known monolingual session: `.\Start.bat --language Arabic` or `.\Start.bat --language Cantonese`.
 
 ## Hermes (next, not MVP)
 
