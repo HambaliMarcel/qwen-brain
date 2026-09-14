@@ -115,7 +115,10 @@ if ($IntegratorArgs -and $IntegratorArgs.Count -gt 0) {
     $flags = @($IntegratorArgs)
 }
 if ($flags -notcontains "--profile") {
-    $flags = @("--profile", "auto") + $flags
+    $flags = @("--profile", "ultralow") + $flags
+}
+if ($flags -notcontains "--hop") {
+    $flags += @("--hop", "0.50")
 }
 if ($flags -notcontains "--max-tokens") {
     $flags += @("--max-tokens", "32")
@@ -126,14 +129,29 @@ if ($flags -notcontains "--unfixed-chunks") {
 if ($flags -notcontains "--unfixed-tokens") {
     $flags += @("--unfixed-tokens", "5")
 }
+if ($flags -notcontains "--min-audio") {
+    $flags += @("--min-audio", "0.40")
+}
 if ($flags -notcontains "--pann-interval") {
-    $flags += @("--pann-interval", "0.45")
+    $flags += @("--pann-interval", "0.8")
 }
 if ($flags -notcontains "--language") {
     $flags += @("--language", "mix")
 }
 if (($flags -notcontains "--lid-lock") -and ($flags -notcontains "--no-lid-lock")) {
     $flags += "--no-lid-lock"
+}
+if ($flags -notcontains "--silence-commit") {
+    $flags += @("--silence-commit", "0.90")
+}
+if ($flags -notcontains "--silence-hangover") {
+    $flags += @("--silence-hangover", "0.28")
+}
+if ($flags -notcontains "--no-auto-tune") {
+    $flags += "--no-auto-tune"
+}
+if ($flags -notcontains "--no-refine") {
+    $flags += "--no-refine"
 }
 
 Write-Host "Qwen stack  one-shot"
@@ -201,16 +219,34 @@ if (Test-HttpOk $brainUrl) {
 }
 
 if (Test-PortOpen $BusHost $BusPort) {
-    Write-Host "reuse    STT bus  ${BusHost}:${BusPort}"
-} else {
-    $pyArgs = @(
-        "-m", "qwen3_asr_stream.integrator",
-        "--bus-host", $BusHost,
-        "--bus-port", "$BusPort"
-    ) + $flags
-    Start-TitledProcess "Qwen ASR bus" $AsrRoot "python" $pyArgs
-    Wait-PortOpen $BusHost $BusPort 60 "STT bus"
+    Write-Host "restart  STT bus  ${BusHost}:${BusPort}  (pick up hop/pause flags)"
+    Get-CimInstance Win32_Process -Filter "Name='python.exe' OR Name='pythonw.exe'" -ErrorAction SilentlyContinue | ForEach-Object {
+        $cmd = [string]$_.CommandLine
+        if ($cmd -match "qwen3_asr_stream\.integrator") {
+            Write-Host ("  stop integrator  PID {0}" -f $_.ProcessId)
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+    }
+    $owned = Get-NetTCPConnection -LocalPort $BusPort -State Listen -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty OwningProcess -Unique
+    foreach ($procId in @($owned)) {
+        if (-not $procId) { continue }
+        $p = Get-Process -Id $procId -ErrorAction SilentlyContinue
+        if ($null -eq $p) { continue }
+        if ($p.ProcessName -match "python") {
+            Write-Host ("  stop port {0}  PID {1}" -f $BusPort, $procId)
+            Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
+        }
+    }
+    Start-Sleep -Milliseconds 400
 }
+$pyArgs = @(
+    "-m", "qwen3_asr_stream.integrator",
+    "--bus-host", $BusHost,
+    "--bus-port", "$BusPort"
+) + $flags
+Start-TitledProcess "Qwen ASR bus" $AsrRoot "python" $pyArgs
+Wait-PortOpen $BusHost $BusPort 60 "STT bus"
 
 Write-Host ""
 Write-Host "this window is the BRAIN dashboard.  Ctrl+C stops listen only."
