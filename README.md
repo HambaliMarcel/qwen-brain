@@ -30,43 +30,31 @@ Two llama-server processes share the GPU: ASR 1.7B on 9999, chat 4B on 8080. Lea
 
 ## Run (MVP)
 
-**Terminal 1 — ASR server** (skip if already up)
-
-```powershell
-cd C:\Users\marce\Projects\qwen3-asr-stream
-python -m qwen3_asr_stream serve
-```
-
-**Terminal 2 — ears + bus** (new file only: `qwen3_asr_stream\integrator.py`)
-
-```powershell
-cd C:\Users\marce\Projects\qwen3-asr-stream
-python -m qwen3_asr_stream.integrator
-```
-
-Same mic flags as `python -m qwen3_asr_stream mic` (`--profile ultralow`, `--device`, …). Extra flags: `--bus-port 18765`, `--no-ui`.
-
-**Terminal 3 — 4B brain**
+One command starts ASR server, 4B server, live STT bus, and the brain dashboard. Extra windows open for the GPU servers and the mic; this window stays on **LIVE / YOU / BRAIN**. Already-running ports are reused.
 
 ```powershell
 cd C:\Users\marce\Projects\qwen-brain
-python -m qwen_brain serve
+.\Start.bat
 ```
 
-**Terminal 4 — live replies**
+Or:
 
 ```powershell
-cd C:\Users\marce\Projects\qwen-brain
-python -m qwen_brain listen
+.\scripts\start-all.ps1
+.\scripts\start-all.ps1 --profile ultralow
 ```
 
-Or start the 4B with the listener:
+Stop the stack:
 
 ```powershell
-python -m qwen_brain listen --start-server
+.\Stop.bat
 ```
 
-Dashboard: **LIVE** = STT draft, **YOU** = command sent to the brain, **BRAIN** = streamed tokens. `ttft` is time to first token after the command is sent.
+Ctrl+C in the dashboard stops **listen** only (GPU servers stay warm). Use `Stop.bat` to kill everything.
+
+Manual four-terminal commands are still in `scripts\` if you need them. Same mic flags as `python -m qwen3_asr_stream mic` (`--profile ultralow`, `--device`, …) pass through `start-all.ps1`.
+
+Dashboard: **LIVE** = STT draft, **YOU** = command, **BRAIN** = streamed tokens. The window snaps to the left third of the screen like Cindy. STATUS shows mode, ttft, generation time, tok/s, e2e, prefill, token counts, and rolling averages. LOG stamps YOU / BRAIN / LAT / CUT / BUS / MODE.
 
 Typed debug (no mic):
 
