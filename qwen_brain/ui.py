@@ -1,8 +1,7 @@
-"""Sticky STATUS header + Cindy-style YOU / BRAIN turns.
+"""STATUS header + append-only Cindy-style YOU / BRAIN turns.
 
-LIVE is inlined on the YOU line (yellow draft, black final). BRAIN streams
-on the next line. LAT is always the last screen row, rewritten in place.
-The log region is painted from a turn buffer so lines never collide.
+Only finalized YOU / BRAIN pairs are printed. The normal terminal screen is
+used so Windows Terminal keeps native mouse-wheel and PageUp scrollback.
 """
 
 from __future__ import annotations
@@ -34,6 +33,8 @@ ALT_ON = f"{CSI}?1049h"
 ALT_OFF = f"{CSI}?1049l"
 HIDE = f"{CSI}?25l"
 SHOW = f"{CSI}?25h"
+SAVE = f"{CSI}s"
+RESTORE = f"{CSI}u"
 HOME = f"{CSI}H"
 CLEAR = f"{CSI}2J"
 EL = f"{CSI}2K"
@@ -132,16 +133,19 @@ class BrainUI:
         self._brain_stamp = ""
         self._turns: list[tuple[str, str, str]] = []
         self._lat_text = "ttft -  gen -  tok/s -  e2e -  ctx -"
+        self._scrollback = True
 
     def banner(self, title: str, detail: str) -> None:
         apply_light_terminal("Qwen brain")
         self.title = title.split("·")[0].strip().upper() or "QWEN BRAIN"
         self.detail = detail
         self._refresh_geom()
-        sys.stdout.write(PAPER + ALT_ON + HIDE + f"{CSI}r" + CLEAR + HOME)
+        sys.stdout.write(PAPER + SHOW + f"{CSI}r" + CLEAR + HOME)
         self._started = True
+        self._set_scroll_region()
+        self._goto(SCROLL_TOP, 1)
         self._paint_header(force=True)
-        self._paint_frame(force=True)
+        self._paint_lat(force=True)
         sys.stdout.flush()
 
     def _refresh_geom(self) -> None:
@@ -166,6 +170,9 @@ class BrainUI:
 
     def _goto(self, row: int, col: int = 1) -> None:
         sys.stdout.write(f"{CSI}{row};{col}H")
+
+    def _set_scroll_region(self) -> None:
+        sys.stdout.write(f"{CSI}{SCROLL_TOP};{self._log_bottom()}r")
 
     def _with_fixed(self, fn) -> None:
         with self._lock:
@@ -278,9 +285,14 @@ class BrainUI:
             lines.append(" " * w)
 
         def paint() -> None:
+            if self._scrollback:
+                sys.stdout.write(SAVE)
+                self._set_scroll_region()
             for i, ln in enumerate(lines[:HEADER_ROWS], start=1):
                 self._goto(i, 1)
                 sys.stdout.write(EL + ln)
+            if self._scrollback:
+                sys.stdout.write(RESTORE)
 
         self._with_fixed(paint)
 
@@ -388,6 +400,8 @@ class BrainUI:
     def _paint_frame(self, force: bool = False) -> None:
         if not self._started:
             return
+        if self._scrollback:
+            return
         lat = self._lat_body()
         you = you_parts(self.you, self.live, self.event_label) if self._you_open else ("", "")
         sig = (
@@ -451,6 +465,23 @@ class BrainUI:
         )
 
     def _paint_lat(self, force: bool = False) -> None:
+        if self._scrollback and self._started:
+            text = self._lat_body()
+            if not force and text == self._lat_text:
+                return
+            self._lat_text = text
+            self._lat_stamp = _now()
+
+            def paint() -> None:
+                sys.stdout.write(SAVE)
+                self._goto(self._lat_row(), 1)
+                sys.stdout.write(
+                    self._line(f"{self._lat_stamp}  LAT     {text}", DIM)
+                )
+                sys.stdout.write(RESTORE)
+
+            self._with_fixed(paint)
+            return
         self._paint_frame(force=force)
 
     def set_status(self, status: str, hint: str = "") -> None:
@@ -465,6 +496,8 @@ class BrainUI:
             return
         self.live = incoming
         self.metrics.stt_live_updates += 1
+        if self._scrollback:
+            return
         if self._brain_open:
             return
         if incoming and not self._you_open:
@@ -478,6 +511,8 @@ class BrainUI:
 
     def set_you(self, text: str) -> None:
         self.you = text or ""
+        if self._scrollback:
+            return
         if self._brain_open:
             self._commit_open_brain(self.brain)
         if not self._you_open:
@@ -491,6 +526,8 @@ class BrainUI:
         if not body:
             return
         self.brain = body
+        if self._scrollback:
+            return
         self._commit_open_you()
         if not self._brain_open:
             self._brain_stamp = _now()
@@ -498,6 +535,23 @@ class BrainUI:
         self._paint_frame(force=True)
 
     def on_stream(self, delta: str, stats: StreamStats, *, e2e_ms: float = 0.0) -> None:
+        if self._scrollback:
+            if self._brain_streaming:
+                self.brain += delta
+            else:
+                self.brain = delta
+            self._brain_streaming = True
+            self.ttft_ms = stats.first_token_ms
+            self.total_ms = stats.total_ms
+            self.decode_ms = stats.decode_ms
+            self.prompt_ms = stats.prompt_ms
+            self.tok_s = stats.tok_s
+            self.tokens = stats.tokens
+            self.prompt_tokens = stats.prompt_tokens
+            self.chars = stats.chars
+            if e2e_ms:
+                self.e2e_ms = e2e_ms
+            return
         now = time.perf_counter()
         first = not self._brain_open
         self._brain_streaming = True
@@ -542,7 +596,7 @@ class BrainUI:
             if used > self.ctx_used:
                 self.ctx_used = used
         self._paint_header(force=True)
-        self._paint_frame(force=True)
+        self._paint_lat(force=True)
 
     def set_context(self, used: int, n_ctx: int) -> None:
         if n_ctx > 0:
@@ -550,13 +604,26 @@ class BrainUI:
         if used >= 0:
             self.ctx_used = used
         self._paint_header()
-        self._paint_frame()
+        self._paint_lat()
 
     def note_reply(self, text: str, stats: StreamStats, *, e2e_ms: float, trigger: str) -> None:
         if text:
             self.brain = text
         self.trigger = trigger
         self.update_gen(stats, e2e_ms=e2e_ms)
+        if self._scrollback:
+            prompt = (self.you or "").strip()
+            answer = (text or self.brain or "").strip()
+            if prompt:
+                self._append_log("YOU", prompt, YOU_C)
+            if answer:
+                self._append_log("BRAIN", answer, BRAIN_C)
+            self._paint_lat(force=True)
+            self.you = ""
+            self.live = ""
+            self.brain = ""
+            self._brain_streaming = False
+            return
         self._commit_open_you()
         self._commit_open_brain(text or self.brain)
         self.you = ""
@@ -568,6 +635,8 @@ class BrainUI:
         if not event:
             return
         self.event_label = event
+        if self._scrollback:
+            return
         if not self.live:
             self.live = f"[{event}]"
         if not self._you_open and not self._brain_open:
@@ -579,6 +648,12 @@ class BrainUI:
 
     def note_cut(self, reason: str = "barge-in") -> None:
         self.metrics.barge_ins += 1
+        if self._scrollback:
+            self.brain = ""
+            self.you = ""
+            self.live = ""
+            self.hint = reason
+            return
         self._commit_open_brain(self.brain)
         self.brain = ""
         if not self._you_open:
@@ -590,6 +665,9 @@ class BrainUI:
     def note_error(self, msg: str) -> None:
         self.metrics.errors += 1
         self._brain_streaming = False
+        if self._scrollback:
+            self._append_log("ERROR", (msg or "").strip(), WARN)
+            return
         self._commit_open_you()
         self._commit_open_brain(self.brain)
         body = (msg or "").strip()
@@ -631,7 +709,7 @@ class BrainUI:
     def close(self, final: str = "") -> None:
         if self._started:
             sys.stdout.write(f"{CSI}r")
-            sys.stdout.write(SHOW + ALT_OFF + RESET)
+            sys.stdout.write(SHOW + RESET)
             self._started = False
             sys.stdout.flush()
         text = final or self.brain
@@ -641,3 +719,25 @@ class BrainUI:
             print(f"BRAIN  {text}")
             print(f"LAT    {self._lat_body()}")
             print()
+
+    def _append_log(self, label: str, text: str, color: str) -> None:
+        """Append one wrapped record without cursor rewrites, preserving scrollback."""
+        body = (text or "").replace("\n", " ").strip()
+        if not body:
+            return
+        stamp = _now()
+        prefix = self._prefix(stamp, label)
+        width = max(12, self._width() - len(prefix))
+        chunks = textwrap.wrap(
+            body,
+            width=width,
+            break_long_words=False,
+            break_on_hyphens=False,
+        ) or [body]
+        with self._lock:
+            for i, chunk in enumerate(chunks):
+                lead = prefix if i == 0 else " " * len(prefix)
+                sys.stdout.write(
+                    f"{PAPER}{NAVY_B}{lead}{RESET}{PAPER}{color}{chunk}{RESET}{PAPER}\n"
+                )
+            sys.stdout.flush()
