@@ -1,0 +1,3 @@
+# qwen-brain uses the Python stdlib only (urllib, socket, argparse).
+# Optional:
+#   pytest>=8.0
