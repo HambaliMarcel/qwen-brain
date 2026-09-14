@@ -13,7 +13,7 @@ import threading
 import time
 from datetime import datetime
 
-from .events import with_sound_context
+from .events import canonical_turn
 from .llm import StreamStats
 from .metrics import SessionMetrics
 from .window import apply_light_terminal, console_width
@@ -33,8 +33,8 @@ ALT_ON = f"{CSI}?1049h"
 ALT_OFF = f"{CSI}?1049l"
 HIDE = f"{CSI}?25l"
 SHOW = f"{CSI}?25h"
-SAVE = f"{CSI}s"
-RESTORE = f"{CSI}u"
+SAVE = "\x1b7"
+RESTORE = "\x1b8"
 HOME = f"{CSI}H"
 CLEAR = f"{CSI}2J"
 EL = f"{CSI}2K"
@@ -77,8 +77,9 @@ def _now() -> str:
 
 def you_parts(final: str, live: str, event: str = "") -> tuple[str, str]:
     """Black committed words sent to the brain, plus yellow live remainder."""
-    black = with_sound_context(final, event) if (final or "").strip() else ""
-    full = with_sound_context((live or final or "").strip(), event)
+    del event  # room tags stay on STATUS, not glued onto YOU
+    black = (final or "").strip()
+    full = (live or final or "").strip()
     if not black:
         return "", full
     if full.lower().startswith(black.lower()):
@@ -134,6 +135,8 @@ class BrainUI:
         self._turns: list[tuple[str, str, str]] = []
         self._lat_text = "ttft -  gen -  tok/s -  e2e -  ctx -"
         self._scrollback = True
+        self._last_you_canon = ""
+        self._last_brain_canon = ""
 
     def banner(self, title: str, detail: str) -> None:
         apply_light_terminal("Qwen brain")
@@ -437,7 +440,7 @@ class BrainUI:
         if not self._you_open:
             return
         black, _draft = you_parts(self.you, self.live, self.event_label)
-        body = black or with_sound_context(self.you or self.live, self.event_label)
+        body = black or (self.you or self.live or "").strip()
         if body:
             self._turns.append(("YOU", self._you_stamp or _now(), body))
             if len(self._turns) > MAX_TURNS:
@@ -512,6 +515,8 @@ class BrainUI:
     def set_you(self, text: str) -> None:
         self.you = text or ""
         if self._scrollback:
+            if self._started:
+                self._append_log("YOU", self.you, YOU_C)
             return
         if self._brain_open:
             self._commit_open_brain(self.brain)
@@ -536,6 +541,7 @@ class BrainUI:
 
     def on_stream(self, delta: str, stats: StreamStats, *, e2e_ms: float = 0.0) -> None:
         if self._scrollback:
+            first_tok = not self._brain_streaming
             if self._brain_streaming:
                 self.brain += delta
             else:
@@ -551,6 +557,14 @@ class BrainUI:
             self.chars = stats.chars
             if e2e_ms:
                 self.e2e_ms = e2e_ms
+            if self.status != "ANSWERING":
+                self.status = "ANSWERING"
+                self.hint = "streaming"
+            now = time.perf_counter()
+            if first_tok or (now - self._last_brain_row) >= 0.05:
+                self._last_brain_row = now
+                self._paint_header()
+                self._paint_lat()
             return
         now = time.perf_counter()
         first = not self._brain_open
@@ -612,12 +626,8 @@ class BrainUI:
         self.trigger = trigger
         self.update_gen(stats, e2e_ms=e2e_ms)
         if self._scrollback:
-            prompt = (self.you or "").strip()
             answer = (text or self.brain or "").strip()
-            if prompt:
-                self._append_log("YOU", prompt, YOU_C)
-            if answer:
-                self._append_log("BRAIN", answer, BRAIN_C)
+            self._append_log("BRAIN", answer, BRAIN_C)
             self._paint_lat(force=True)
             self.you = ""
             self.live = ""
@@ -721,9 +731,27 @@ class BrainUI:
             print()
 
     def _append_log(self, label: str, text: str, color: str) -> None:
-        """Append one wrapped record without cursor rewrites, preserving scrollback."""
+        """Append one wrapped record inside the scroll region, never onto LAT."""
         body = (text or "").replace("\n", " ").strip()
         if not body:
+            return
+        if "tok/s" in body and "e2e" in body:
+            cut = body.find("tok/s")
+            # LAT overlay leaked into the YOU line; keep the spoken words only.
+            body = body[: max(0, cut - 4)].rstrip("0123456789.s ")
+            body = body.strip()
+            if not body:
+                return
+        canon = canonical_turn(body) or body.lower()
+        if label == "YOU":
+            if canon == self._last_you_canon:
+                return
+            self._last_you_canon = canon
+        elif label == "BRAIN":
+            if canon == self._last_brain_canon:
+                return
+            self._last_brain_canon = canon
+        if not self._started:
             return
         stamp = _now()
         prefix = self._prefix(stamp, label)
@@ -731,13 +759,19 @@ class BrainUI:
         chunks = textwrap.wrap(
             body,
             width=width,
-            break_long_words=False,
+            break_long_words=True,
             break_on_hyphens=False,
         ) or [body]
         with self._lock:
+            if self._started:
+                sys.stdout.write(SAVE)
+                self._set_scroll_region()
+                self._goto(self._log_bottom(), 1)
             for i, chunk in enumerate(chunks):
                 lead = prefix if i == 0 else " " * len(prefix)
                 sys.stdout.write(
-                    f"{PAPER}{NAVY_B}{lead}{RESET}{PAPER}{color}{chunk}{RESET}{PAPER}\n"
+                    f"{EL}{PAPER}{NAVY_B}{lead}{RESET}{PAPER}{color}{chunk}{RESET}{PAPER}\n"
                 )
+            if self._started:
+                sys.stdout.write(RESTORE)
             sys.stdout.flush()
