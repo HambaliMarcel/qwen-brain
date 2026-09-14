@@ -74,18 +74,23 @@ class LlamaBrain:
         self,
         user_text: str,
         on_token: Optional[Callable[[str, StreamStats], None]] = None,
+        *,
+        remember: bool = True,
     ) -> tuple[str, StreamStats]:
         self._gen += 1
         gen = self._gen
-        self.history.append(ChatTurn("user", user_text.strip()))
-        self._trim()
+        prompt = user_text.strip()
+        if remember:
+            self.history.append(ChatTurn("user", prompt))
+            self._trim()
         stats = StreamStats()
         t0 = time.perf_counter()
         t_first: float | None = None
         pieces: list[str] = []
         first = True
         try:
-            for delta in self._stream(self._messages(), gen, stats):
+            messages = self._messages() if remember else self._messages(prompt)
+            for delta in self._stream(messages, gen, stats):
                 if gen != self._gen:
                     break
                 if not delta:
@@ -112,11 +117,11 @@ class LlamaBrain:
             if gen != self._gen:
                 stats.cancelled = True
                 stats.total_ms = (time.perf_counter() - t0) * 1000.0
-                if self.history and self.history[-1].role == "user":
+                if remember and self.history and self.history[-1].role == "user":
                     self.history.pop()
                 return "", stats
             if not pieces:
-                if self.history and self.history[-1].role == "user":
+                if remember and self.history and self.history[-1].role == "user":
                     self.history.pop()
                 raise
         text = strip_think("".join(pieces)).strip()
@@ -128,22 +133,34 @@ class LlamaBrain:
         cancelled = gen != self._gen
         stats.cancelled = cancelled
         if cancelled or not text:
-            if self.history and self.history[-1].role == "user":
+            if remember and self.history and self.history[-1].role == "user":
                 self.history.pop()
             return text, stats
-        self.history.append(ChatTurn("assistant", text))
-        self._trim()
+        if remember:
+            self.history.append(ChatTurn("assistant", text))
+            self._trim()
         return text, stats
+
+    def remember_turn(self, user_text: str, assistant_text: str) -> None:
+        """Commit a previously speculative result to conversation history."""
+        user = (user_text or "").strip()
+        assistant = (assistant_text or "").strip()
+        if not user or not assistant:
+            return
+        self.history.extend((ChatTurn("user", user), ChatTurn("assistant", assistant)))
+        self._trim()
 
     def _trim(self) -> None:
         cap = max(2, int(self.cfg.history_turns) * 2)
         if len(self.history) > cap:
             self.history = self.history[-cap:]
 
-    def _messages(self) -> list[dict]:
+    def _messages(self, pending_user: str = "") -> list[dict]:
         msgs = [{"role": "system", "content": self.cfg.system_prompt or VOICE_SYSTEM_PROMPT}]
         for turn in self.history:
             msgs.append({"role": turn.role, "content": turn.content})
+        if pending_user:
+            msgs.append({"role": "user", "content": pending_user})
         return msgs
 
     def _stream(self, messages: list[dict], gen: int = 0, stats: StreamStats | None = None) -> Iterator[str]:
