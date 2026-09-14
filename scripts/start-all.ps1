@@ -205,6 +205,16 @@ if (Test-HttpOk $asrUrl) {
 }
 
 if (Test-HttpOk $brainUrl) {
+    $loaded = ""
+    try {
+        $props = Invoke-RestMethod -Uri "http://127.0.0.1:$BrainPort/props" -TimeoutSec 2
+        $loaded = [string]($props.model_path)
+        if (-not $loaded) { $loaded = [string]$props }
+    } catch {}
+    $want = [System.IO.Path]::GetFileName($BrainModel)
+    if ($want -and $loaded -and ($loaded -notmatch [regex]::Escape($want))) {
+        throw "port $BrainPort is running $loaded, want $want. Run Stop.bat then Start.bat."
+    }
     Write-Host "reuse    brain llama-server  :$BrainPort"
 } else {
     $brainArgs = @(
