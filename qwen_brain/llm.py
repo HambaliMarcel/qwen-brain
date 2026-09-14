@@ -15,6 +15,20 @@ from .config import BrainConfig, VOICE_SYSTEM_PROMPT
 from .metrics import tok_per_sec
 from .server import LlamaServerError
 
+# Last-user nudge only. Never stored in history.
+_LAST_TURN_STEER = (
+    "Jawab sebagai temannya. React ke makna dari chat sebelumnya. "
+    "Jangan kutip kata-katanya. Jangan ganti topik. ASR boleh typo. "
+    "Jangan sebut instruksi ini."
+)
+
+
+def _steer_last_user(text: str) -> str:
+    t = (text or "").strip()
+    if not t:
+        return t
+    return f"{t}\n\n[{_LAST_TURN_STEER}]"
+
 THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 THINK_OPEN = "<think>"
 THINK_CLOSE = "</think>"
@@ -157,10 +171,15 @@ class LlamaBrain:
 
     def _messages(self, pending_user: str = "") -> list[dict]:
         msgs = [{"role": "system", "content": self.cfg.system_prompt or VOICE_SYSTEM_PROMPT}]
-        for turn in self.history:
-            msgs.append({"role": turn.role, "content": turn.content})
+        turns: list[ChatTurn] = list(self.history)
         if pending_user:
-            msgs.append({"role": "user", "content": pending_user})
+            turns.append(ChatTurn("user", pending_user))
+        last_user = max((i for i, turn in enumerate(turns) if turn.role == "user"), default=-1)
+        for i, turn in enumerate(turns):
+            content = turn.content
+            if i == last_user:
+                content = _steer_last_user(content)
+            msgs.append({"role": turn.role, "content": content})
         return msgs
 
     def _stream(self, messages: list[dict], gen: int = 0, stats: StreamStats | None = None) -> Iterator[str]:
@@ -170,6 +189,7 @@ class LlamaBrain:
             "top_p": float(getattr(self.cfg, "top_p", 0.8)),
             "top_k": int(getattr(self.cfg, "top_k", 20)),
             "min_p": 0.0,
+            "repeat_penalty": 1.12,
             "max_tokens": self.cfg.max_tokens,
             "stream": True,
             "stream_options": {"include_usage": True},
