@@ -1,7 +1,7 @@
 [project]
 name = "qwen-brain"
 version = "0.1.0"
-description = "Local Qwen3.5-4B voice brain: live Qwen3-ASR in, streamed text out."
+description = "Local Qwen3.8-27B voice brain: live Qwen3-ASR in, streamed text out."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = []

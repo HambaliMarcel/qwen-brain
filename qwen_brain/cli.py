@@ -133,18 +133,18 @@ def build_parser() -> argparse.ArgumentParser:
     shared = _shared_flags()
     p = argparse.ArgumentParser(
         prog="qwen_brain",
-        description="Local Qwen3.5-4B brain driven by live Qwen3-ASR.",
+        description="Local Qwen3.8-27B brain driven by live Qwen3-ASR.",
     )
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    s = sub.add_parser("serve", help="Start llama-server with the 4B chat GGUF", parents=[shared])
+    s = sub.add_parser("serve", help="Start llama-server with the 27B chat GGUF", parents=[shared])
     s.add_argument("--same-console", action="store_true")
     s.set_defaults(func=cmd_serve)
 
-    m = sub.add_parser("listen", help="Consume live STT and stream 4B text replies", parents=[shared])
+    m = sub.add_parser("listen", help="Consume live STT and stream 27B text replies", parents=[shared])
     m.set_defaults(func=cmd_listen)
 
-    c = sub.add_parser("chat", help="Type to the 4B without the mic (debug)", parents=[shared])
+    c = sub.add_parser("chat", help="Type to the 27B without the mic (debug)", parents=[shared])
     c.set_defaults(func=cmd_chat)
     return p
 
