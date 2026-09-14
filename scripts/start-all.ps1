@@ -15,7 +15,7 @@ param(
 $ErrorActionPreference = "Stop"
 try { chcp 65001 | Out-Null } catch {}
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-$Host.UI.RawUI.WindowTitle = "Qwen brain  listen"
+$Host.UI.RawUI.WindowTitle = "brain  listen"
 
 $BrainRoot = Split-Path -Parent $PSScriptRoot
 $AsrRoot = if ($env:QWEN_ASR_ROOT) { $env:QWEN_ASR_ROOT } else { "C:\Users\marce\Projects\qwen3-asr-stream" }
