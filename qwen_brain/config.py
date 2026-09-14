@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_LLAMA = Path(r"C:\AI\llama.cpp\llama-server.exe")
-DEFAULT_MODEL = Path(r"C:\AI\models\Qwen3.5-4B-Q8_0.gguf")
+DEFAULT_MODEL = Path(r"C:\AI\models\Qwen3.8-27B-Uncensored-YMQ-XS-TI.gguf")
 DEFAULT_BRAIN_PORT = 8080
 DEFAULT_STT_PORT = 18765
 DEFAULT_HERMES_API = "http://127.0.0.1:8642"
