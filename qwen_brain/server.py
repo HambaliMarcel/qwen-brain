@@ -56,6 +56,14 @@ def build_server_cmd(cfg: BrainConfig, extra: Optional[list[str]] = None) -> lis
         "--jinja",
         "--cache-prompt",
         "--no-webui",
+        "--reasoning-budget",
+        "0",
+        "--chat-template-kwargs",
+        '{"enable_thinking":false}',
+        "-ctk",
+        "q8_0",
+        "-ctv",
+        "q8_0",
     ]
     if extra:
         cmd.extend(extra)
