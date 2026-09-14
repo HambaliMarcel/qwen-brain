@@ -84,13 +84,25 @@ class SpeculativeHistoryTests(unittest.TestCase):
         text, _stats = brain.ask("draft words", remember=False)
         self.assertEqual(text, "ready")
         self.assertEqual(brain.history, [])
-        self.assertEqual(brain.seen[-1], {"role": "user", "content": "draft words"})
+        self.assertEqual(brain.seen[-1]["role"], "user")
+        self.assertTrue(brain.seen[-1]["content"].startswith("draft words"))
+        self.assertIn("Jangan ganti topik", brain.seen[-1]["content"])
 
         brain.remember_turn("final words", text)
         self.assertEqual(
             [(turn.role, turn.content) for turn in brain.history],
             [("user", "final words"), ("assistant", "ready")],
         )
+
+
+class PersonalityTests(unittest.TestCase):
+    def test_prompt_stays_on_thread_and_does_not_quote(self):
+        from qwen_brain.config import VOICE_SYSTEM_PROMPT
+
+        text = VOICE_SYSTEM_PROMPT.lower()
+        self.assertIn("continuation", text)
+        self.assertIn("do not quote", text)
+        self.assertIn("typo", text)
 
 
 class TurnPolicyTests(unittest.TestCase):
