@@ -16,7 +16,6 @@ from .events import (
     looks_complete,
     meaningfully_longer,
     same_turn,
-    should_prompt_sound,
     with_sound_context,
 )
 from .hermes import make_brain
@@ -105,8 +104,15 @@ class AssistantSession:
         self._stable_at = 0.0
         self._job = 0
         self._done_job = 0
-        self._sent_sound = ""
-        self._sent_sound_at = 0.0
+        self._job_uid = -1
+        self._publish_job = 0
+        self._visible_job = 0
+        self._result_job = 0
+        self._result_prompt = ""
+        self._result_text = ""
+        self._result_stats = StreamStats()
+        self._result_e2e_ms = 0.0
+        self._state_lock = threading.RLock()
 
     def run(self) -> int:
         self.ui.backend = self.cfg.backend
@@ -185,34 +191,17 @@ class AssistantSession:
         self._last_event_at = monotonic()
         self.ui.note_sound(event, score=ev.event_score)
 
-    def _maybe_send_sound(self, ev: SttEvent) -> None:
-        tag = (ev.event or "").strip().strip("[]")
-        if not should_prompt_sound(
-            tag, companion=ev.companion, non_speech_only=ev.non_speech_only
-        ):
-            return
-        now = monotonic()
-        if tag == self._sent_sound and (now - self._sent_sound_at) < 8.0:
-            return
-        if self.ui.status in {"THINKING", "ANSWERING"}:
-            return
-        self._sent_sound = tag
-        self._sent_sound_at = now
-        self._start_reply(f"[{tag}]", "sound")
-
-    def _live_display(self, ev: SttEvent) -> str:
-        shown = (ev.display or ev.text or "").strip()
-        event = (ev.event or self._last_event or "").strip()
-        if event:
-            return with_sound_context(shown or ev.text, event)
-        return shown
-
     def _prompt_for(self, text: str) -> str:
-        event = self.ui.event_label or self._last_event
+        event = self._last_event
         fresh = self._last_event_at and (monotonic() - self._last_event_at) < 6.0
         if event and fresh:
             return with_sound_context(text, event)
         return text
+
+    def _clear_event_context(self) -> None:
+        self._last_event = ""
+        self._last_event_at = 0.0
+        self.ui.event_label = ""
 
     def _trigger_name(self, ev: SttEvent) -> str:
         if ev.type == "commit":
@@ -267,8 +256,6 @@ class AssistantSession:
             self._stable_text = live_text
             self._stable_at = monotonic()
         busy = self.ui.status in {"THINKING", "ANSWERING"}
-        if ev.type in {"live", "sound", "commit"}:
-            self.ui.set_live(self._live_display(ev))
         if ev.type == "live":
             if ev.speaking and self._should_barge(ev):
                 self.brain.cancel()
@@ -276,7 +263,8 @@ class AssistantSession:
                 self.policy.inflight_uid = -1
                 self._job += 1
                 self._fire_at = 0.0
-                self.ui.note_cut("barge-in")
+                if self._visible_job:
+                    self.ui.note_cut("barge-in")
             elif not busy:
                 if ev.speaking:
                     self.ui.set_status("SPEAKING", ev.language or "mix")
@@ -288,62 +276,119 @@ class AssistantSession:
             (bool(ev.event) or is_sound_tag(live_text) or is_sound_tag(ev.display))
             and not is_command_text(live_text)
         )
-        if event_only and ev.type in {"live", "sound"} and not busy:
-            if not ev.event:
-                ev.event = live_text.strip().strip("[]") or ev.display.strip().strip("[]")
-            self._maybe_send_sound(ev)
+        if event_only:
+            # PANN/ASR tags are scene context. A tag by itself must never
+            # become a user question; it is attached to the next lexical turn.
+            return
+        if ev.type == "commit" and is_command_text(live_text):
+            final_prompt = self._prompt_for(live_text)
+            same_speculation = (
+                ev.utterance_id == self.policy.sent_uid
+                and same_turn(self.policy.sent_text, live_text)
+                and not meaningfully_longer(self.policy.sent_text, live_text, extra=2)
+            )
+            if same_speculation and self._job_uid == ev.utterance_id:
+                self.policy.sent_text = live_text
+                self._promote_speculation(final_prompt)
+            else:
+                self.policy._accept(ev.utterance_id, live_text)
+                self._start_reply(
+                    final_prompt,
+                    "commit",
+                    uid=ev.utterance_id,
+                    publish=True,
+                )
+            self._clear_event_context()
             return
         if ev.type == "live" and ev.speaking and looks_complete(live_text):
             if (monotonic() - self._stable_at) < LIVE_STABLE_SEC:
                 return
         prompt = self.policy.should_ask(ev)
         if prompt:
-            self._sent_sound = ""
-            self._start_reply(self._prompt_for(prompt), self._trigger_name(ev))
+            self._start_reply(
+                self._prompt_for(prompt),
+                self._trigger_name(ev),
+                uid=ev.utterance_id,
+                publish=False,
+            )
 
-    def _start_reply(self, prompt: str, trigger: str) -> None:
+    def _start_reply(
+        self,
+        prompt: str,
+        trigger: str,
+        *,
+        uid: int,
+        publish: bool,
+    ) -> None:
         self._latest_prompt = prompt
         self._trigger = trigger
         self._fire_at = monotonic()
         self._last_token_at = 0.0
         self._job += 1
+        self._job_uid = uid
         self.brain.cancel()
         self.tts.cancel()
-        if trigger == "sound" and self.policy.inflight_uid < 0:
-            uid = int(self.ui.metrics.utterance_id)
-            self.policy.inflight_uid = uid
-            self.policy.sent_uid = uid
-            self.policy.sent_text = prompt
+        self._publish_job = self._job if publish else 0
+        self._visible_job = self._job if publish else 0
+        self._result_job = 0
         self.ui.trigger = trigger
         self.ui.brain = ""
-        self.ui.set_you(prompt)
+        if publish:
+            self.ui.set_you(prompt)
         self.ui.ttft_ms = 0.0
         self.ui.total_ms = 0.0
         self.ui.decode_ms = 0.0
         self.ui.e2e_ms = 0.0
         self.ui.tok_s = 0.0
-        self.ui.set_status("THINKING", f"{trigger} · first token…")
+        hint = "final · first token…" if publish else "speculating · awaiting LAST"
+        self.ui.set_status("THINKING", hint)
+
+    def _promote_speculation(self, final_prompt: str) -> None:
+        """Make the latest hidden generation canonical once ASR emits LAST."""
+        with self._state_lock:
+            job = self._job
+            self._publish_job = job
+            self.ui.trigger = "commit"
+            self.ui.set_you(final_prompt)
+            if self._result_job == job and self._result_text:
+                self._publish_result(
+                    final_prompt,
+                    self._result_text,
+                    self._result_stats,
+                    self._result_e2e_ms,
+                    "commit",
+                    remember=True,
+                )
+                return
+        self.ui.set_status("THINKING", "final · using speculative result")
 
     def _execute(self, prompt: str, trigger: str, job: int) -> None:
         if job != self._job:
             return
         acc: list[str] = []
+        visible = job == self._visible_job
 
         def on_token(delta: str, stats: StreamStats) -> None:
             if job != self._job:
                 return
             acc.append(delta)
             self._last_token_at = monotonic()
-            self.tts.on_token(delta)
-            e2e = (monotonic() - self._fire_at) * 1000.0
-            self.ui.on_stream(delta, stats, e2e_ms=e2e)
+            if visible:
+                self.tts.on_token(delta)
+                e2e = (monotonic() - self._fire_at) * 1000.0
+                self.ui.on_stream(delta, stats, e2e_ms=e2e)
 
         try:
-            text, stats = self.brain.ask(prompt, on_token=on_token)
+            text, stats = self.brain.ask(
+                prompt,
+                on_token=on_token,
+                remember=visible,
+            )
         except Exception as e:
             if job != self._job:
                 return
-            self.ui.note_error(str(e))
+            if visible or job == self._publish_job:
+                self.ui.note_error(str(e))
             self.ui.set_status("LISTENING", "error")
             self.policy.inflight_uid = -1
             self._fire_at = 0.0
@@ -351,6 +396,39 @@ class AssistantSession:
         if job != self._job:
             return
         e2e = (monotonic() - self._fire_at) * 1000.0
+        with self._state_lock:
+            self._result_job = job
+            self._result_prompt = prompt
+            self._result_text = text
+            self._result_stats = stats
+            self._result_e2e_ms = e2e
+            publish = job == self._publish_job
+        if publish:
+            final_prompt = self.ui.you or prompt
+            self._publish_result(
+                final_prompt,
+                text,
+                stats,
+                e2e,
+                "commit",
+                remember=not visible,
+            )
+        else:
+            self._fire_at = 0.0
+            self.ui.set_status("LISTENING", "draft ready · awaiting LAST")
+
+    def _publish_result(
+        self,
+        prompt: str,
+        text: str,
+        stats: StreamStats,
+        e2e: float,
+        trigger: str,
+        *,
+        remember: bool,
+    ) -> None:
+        if remember and text:
+            self.brain.remember_turn(prompt, text)
         self.ui.metrics.record_turn(
             trigger=trigger,
             ttft_ms=stats.first_token_ms,
@@ -359,13 +437,17 @@ class AssistantSession:
             tok_s=stats.tok_s,
             cancelled=stats.cancelled,
         )
-        if text and not acc:
+        if text and not self.ui.brain:
             self.ui.set_brain(text)
         self.ui.note_reply(text, stats, e2e_ms=e2e, trigger=trigger)
         threading.Thread(target=self._refresh_context, name="brain-ctx", daemon=True).start()
+        if remember and text:
+            self.tts.on_token(text)
         self.tts.flush()
         self.policy.inflight_uid = -1
         self._fire_at = 0.0
+        self._publish_job = 0
+        self._visible_job = 0
         if stats.cancelled:
             self.ui.set_status("LISTENING", "cancelled")
         else:
