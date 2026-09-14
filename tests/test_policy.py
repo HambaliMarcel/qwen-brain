@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import unittest
 
+from qwen_brain.config import BrainConfig
 from qwen_brain.events import (
     SttEvent,
     is_command_text,
     parse_event,
     same_turn,
-    should_prompt_sound,
     with_sound_context,
 )
-from qwen_brain.llm import split_think_stream, strip_think
+from qwen_brain.llm import LlamaBrain, split_think_stream, strip_think
 from qwen_brain.session import TurnPolicy
 
 
@@ -47,10 +47,6 @@ class EventTests(unittest.TestCase):
         )
         self.assertEqual(with_sound_context("", "batuk?"), "[batuk?]")
         self.assertEqual(with_sound_context("[batuk?]", "batuk?"), "[batuk?]")
-        self.assertTrue(should_prompt_sound("batuk?"))
-        self.assertFalse(should_prompt_sound("typing"))
-        self.assertFalse(should_prompt_sound("finger snapping", companion=True))
-        self.assertTrue(should_prompt_sound("finger snapping", companion=True, non_speech_only=True))
 
     def test_same_turn(self):
         self.assertTrue(same_turn("jam berapa", "jam berapa sekarang"))
@@ -70,6 +66,26 @@ class ThinkStripTests(unittest.TestCase):
         hold, emit = split_think_stream("A<think>x</think>B")
         self.assertEqual(hold, "")
         self.assertEqual(emit, "AB")
+
+
+class SpeculativeHistoryTests(unittest.TestCase):
+    def test_hidden_ask_does_not_pollute_history(self):
+        class StubBrain(LlamaBrain):
+            def _stream(self, messages, gen=0, stats=None):
+                self.seen = messages
+                yield "ready"
+
+        brain = StubBrain(BrainConfig())
+        text, _stats = brain.ask("draft words", remember=False)
+        self.assertEqual(text, "ready")
+        self.assertEqual(brain.history, [])
+        self.assertEqual(brain.seen[-1], {"role": "user", "content": "draft words"})
+
+        brain.remember_turn("final words", text)
+        self.assertEqual(
+            [(turn.role, turn.content) for turn in brain.history],
+            [("user", "final words"), ("assistant", "ready")],
+        )
 
 
 class TurnPolicyTests(unittest.TestCase):

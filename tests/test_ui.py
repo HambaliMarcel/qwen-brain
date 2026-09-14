@@ -42,6 +42,7 @@ class TurnBufferTests(unittest.TestCase):
         from qwen_brain.ui import BrainUI
 
         ui = BrainUI()
+        ui._scrollback = False
         ui.set_you("[batuk?]")
         ui._commit_open_you()
         ui.brain = "Kamu batuk ya?"
