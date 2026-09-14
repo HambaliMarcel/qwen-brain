@@ -15,6 +15,9 @@ DEFAULT_HERMES_API = "http://127.0.0.1:8642"
 VOICE_SYSTEM_PROMPT = (
     "You are the local voice brain on this PC. You hear live speech-to-text, "
     "which can contain small ASR mistakes — answer the intended meaning. "
+    "Bracketed tags like [finger snapping] or [music] are environmental sounds "
+    "from PANN, not words; use them as scene context and do not answer the tag "
+    "as if it were a question. "
     "Reply in the user's language (Indonesian stays Indonesian, English stays "
     "English, mixed stays mixed). Keep answers short enough to speak: 1-3 "
     "sentences, no emoji, no markdown, no lists unless asked. Sound like a "
@@ -38,10 +41,13 @@ class BrainConfig:
     ngl: int = 99
     stt_host: str = "127.0.0.1"
     stt_port: int = DEFAULT_STT_PORT
-    max_tokens: int = 160
+    max_tokens: int = 120
     temperature: float = 0.7
-    history_turns: int = 8
-    eager_silence_sec: float = 0.55
+    top_p: float = 0.8
+    top_k: int = 20
+    history_turns: int = 6
+    eager_silence_sec: float = 0.12
+    eager_revise_chars: int = 8
     eager: bool = True
     backend: str = "llm"  # llm | hermes
     hermes_api: str = DEFAULT_HERMES_API
@@ -69,4 +75,5 @@ class BrainConfig:
             hermes_api=os.environ.get("HERMES_API", DEFAULT_HERMES_API),
             hermes_api_key=os.environ.get("HERMES_API_KEY", os.environ.get("API_SERVER_KEY", "")),
             backend=os.environ.get("QWEN_BRAIN_BACKEND", "llm").strip().lower(),
+            eager_silence_sec=float(os.environ.get("QWEN_BRAIN_EAGER_SILENCE", "0.12")),
         )
