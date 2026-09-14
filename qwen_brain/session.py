@@ -134,7 +134,7 @@ class AssistantSession:
         self.ui.stt_endpoint = f"{self.cfg.stt_host}:{self.cfg.stt_port}"
         self.ui.llm_endpoint = self.cfg.url if self.cfg.backend == "llm" else self.cfg.hermes_api
         self.ui.banner(
-            "Qwen brain",
+            "brain",
             f"STT {self.ui.stt_endpoint}  ·  LLM {self.ui.llm_endpoint}  ·  {self.cfg.backend}",
         )
         threading.Thread(target=self._refresh_context, name="brain-ctx", daemon=True).start()
