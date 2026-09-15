@@ -107,6 +107,106 @@ class PersonalityTests(unittest.TestCase):
         self.assertIn("continuation", text)
         self.assertIn("do not quote", text)
         self.assertIn("typo", text)
+        self.assertIn("obey", text)
+        self.assertIn("toxic", text)
+        self.assertIn("detail", text)
+
+
+class ReplyBudgetTests(unittest.TestCase):
+    def test_casual_stays_short(self):
+        from qwen_brain.config import BrainConfig
+        from qwen_brain.llm import reply_token_budget
+
+        cfg = BrainConfig()
+        self.assertEqual(reply_token_budget("oke", cfg), 24)
+        self.assertEqual(reply_token_budget("I'm in love with you", cfg), 48)
+
+
+class HistoryTrimTests(unittest.TestCase):
+    def test_history_is_dropped_in_blocks_and_starts_on_a_user_turn(self):
+        class StubBrain(LlamaBrain):
+            def _stream(self, messages, gen=0, stats=None, max_tokens=None):
+                yield "ok"
+
+        cfg = BrainConfig()
+        cfg.history_turns = 5
+        brain = StubBrain(cfg)
+        for i in range(5):
+            brain.ask(f"u{i}")
+        self.assertEqual(len(brain.history), 10)
+        brain.ask("u5")
+        # 12 > cap 10 -> down to floor (10 - 2*2 = 6), so the prefix is now
+        # stable for the next two turns instead of shifting every turn.
+        self.assertEqual(len(brain.history), 6)
+        self.assertEqual(brain.history[0].role, "user")
+        self.assertEqual(brain.history[0].content, "u3")
+        brain.ask("u6")
+        self.assertEqual(len(brain.history), 8)
+        self.assertEqual(brain.history[0].content, "u3")
+
+    def test_warm_does_not_cancel_a_real_turn(self):
+        class StubBrain(LlamaBrain):
+            def _stream(self, messages, gen=0, stats=None, max_tokens=None):
+                yield "ok"
+
+        brain = StubBrain(BrainConfig())
+        gen_before = brain._gen
+        brain.warm()
+        self.assertEqual(brain._gen, gen_before)
+        self.assertEqual(brain.history, [])
+        text, stats = brain.ask("halo")
+        self.assertEqual(text, "ok")
+        self.assertFalse(stats.cancelled)
+
+
+class LoopGuardTests(unittest.TestCase):
+    def test_decoder_spiral_is_degenerate(self):
+        from qwen_brain.events import collapse_loops, is_degenerate
+
+        loop = " ".join(["black on"] * 40)
+        collapsed, looped = collapse_loops(loop)
+        self.assertTrue(looped)
+        self.assertEqual(collapsed, "black on black on")
+        self.assertTrue(is_degenerate(loop))
+        self.assertTrue(is_degenerate("Yeah, " + ", ".join(["baby"] * 30) + "."))
+
+    def test_sung_hook_is_not_a_loop(self):
+        from qwen_brain.events import collapse_loops, is_degenerate
+
+        hook = "no love, no love, no love, we don't need it"
+        self.assertEqual(collapse_loops(hook), (hook, False))
+        self.assertFalse(is_degenerate(hook))
+        self.assertFalse(is_degenerate("pesawat pesawat pesawat pesawat"))
+        self.assertEqual(collapse_loops("na na na na na hey")[1], False)
+
+    def test_only_the_unseen_tail_becomes_a_turn(self):
+        from qwen_brain.events import strip_already_sent
+
+        sent = "I still feel a shock through every bone when I hear an I love you."
+        grown = "I'm not sure. " + sent + " How did I fall in love this time?"
+        self.assertEqual(
+            strip_already_sent(sent, grown),
+            "I'm not sure. How did I fall in love this time?",
+        )
+        self.assertEqual(strip_already_sent(sent, sent), "")
+        self.assertEqual(strip_already_sent("oke", "oke sip lanjut"), "oke sip lanjut")
+        self.assertEqual(strip_already_sent(sent, "totally new line here"), "totally new line here")
+
+    def test_detail_ask_gets_a_long_budget(self):
+        from qwen_brain.config import BrainConfig
+        from qwen_brain.llm import reply_token_budget
+
+        cfg = BrainConfig()
+        self.assertEqual(reply_token_budget("jelasin dong secara detail", cfg), 384)
+        self.assertEqual(reply_token_budget("explain step by step how MTP works", cfg), 384)
+
+    def test_long_prompt_gets_a_long_budget(self):
+        from qwen_brain.config import BrainConfig
+        from qwen_brain.llm import reply_token_budget
+
+        cfg = BrainConfig()
+        long = " ".join(["lagu"] * 45)
+        self.assertEqual(reply_token_budget(long, cfg), 384)
 
 
 class TurnPolicyTests(unittest.TestCase):
