@@ -21,10 +21,18 @@ $BrainRoot = Split-Path -Parent $PSScriptRoot
 $AsrRoot = if ($env:QWEN_ASR_ROOT) { $env:QWEN_ASR_ROOT } else { "C:\Users\marce\Projects\qwen3-asr-stream" }
 $Llama = if ($env:LLAMA_SERVER) { $env:LLAMA_SERVER } else { "C:\AI\llama.cpp\llama-server.exe" }
 $Models = if ($env:QWEN_ASR_MODELS_DIR) { $env:QWEN_ASR_MODELS_DIR } else { "C:\AI\models" }
-$AsrModel = if ($env:QWEN_ASR_MODEL) { $env:QWEN_ASR_MODEL } else { Join-Path $Models "Qwen3-ASR-1.7B-Q8_0.gguf" }
+# Q4_K_M: same VRAM class as Q4_0 but far less prone to decoder loops
+# ("black on black on ...") on sung/music input. Q4_0 stays as fallback.
+$AsrDefault = Join-Path $Models "Qwen3-ASR-1.7B-Q4_K_M.gguf"
+if (-not (Test-Path -LiteralPath $AsrDefault)) { $AsrDefault = Join-Path $Models "Qwen3-ASR-1.7B-Q4_0.gguf" }
+$AsrModel = if ($env:QWEN_ASR_MODEL) { $env:QWEN_ASR_MODEL } else { $AsrDefault }
 if ([System.IO.Path]::GetFileName($AsrModel) -match '(?i)bf16') {
-    $AsrModel = Join-Path $Models "Qwen3-ASR-1.7B-Q8_0.gguf"
+    $AsrModel = $AsrDefault
     Write-Host "ASR      bf16 is disabled; using $AsrModel"
+}
+if ([System.IO.Path]::GetFileName($AsrModel) -ceq "qwen3-asr-1.7b-q4_0.gguf") {
+    Write-Host "ASR      cstr qwen3asr GGUF is CrispASR-only; using llama.cpp $AsrDefault"
+    $AsrModel = $AsrDefault
 }
 $AsrMmproj = if ($env:QWEN_ASR_MMPROJ) { $env:QWEN_ASR_MMPROJ } else { Join-Path $Models "mmproj-Qwen3-ASR-1.7B-Q8_0.gguf" }
 $AsrPort = if ($env:QWEN_ASR_PORT) { [int]$env:QWEN_ASR_PORT } else { 9999 }
