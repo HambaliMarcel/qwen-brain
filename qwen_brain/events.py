@@ -180,7 +180,81 @@ def join_fragments(prev: str, new: str) -> str:
         return a
     if same_turn(a, b):
         return b if len(b) >= len(a) else a
+    # ASR LAST re-sends the whole paragraph; if the held piece is already
+    # inside it, the paragraph is the turn, not "piece + paragraph".
+    if _find_span(_norm_words(b), _norm_words(a)) >= 0:
+        return b
     return f"{a} {b}".strip()
+
+
+_LOOP_MAX_NGRAM = 8
+_LOOP_MIN_REPEATS = 4
+# A single word sung 4-5 times ("na na na na na") is normal; only a longer
+# run of one word is a decoder spiral.
+_LOOP_MIN_REPEATS_1GRAM = 6
+_WORD_NORM_RE = re.compile(r"[^\w]+", re.UNICODE)
+
+
+def _norm_words(text: str) -> list[str]:
+    return [_WORD_NORM_RE.sub("", w.lower()) for w in (text or "").split()]
+
+
+def _find_span(hay: list[str], needle: list[str]) -> int:
+    n = len(needle)
+    if not n or n > len(hay):
+        return -1
+    for i in range(len(hay) - n + 1):
+        if hay[i : i + n] == needle:
+            return i
+    return -1
+
+
+def collapse_loops(text: str, keep: int = 2, min_repeats: int = _LOOP_MIN_REPEATS) -> tuple[str, bool]:
+    """Collapse an ASR decoder spiral ("black on black on black on …").
+
+    Hooks sung 2–3 times stay. Only an n-gram repeated `min_repeats`+ times
+    back-to-back is cut to `keep` copies. Returns (text, looped).
+    """
+    words = (text or "").split()
+    n = len(words)
+    if n < min_repeats:
+        return text or "", False
+    norm = _norm_words(text)
+    out: list[str] = []
+    looped = False
+    i = 0
+    while i < n:
+        best_len = 0
+        best_reps = 0
+        for length in range(1, min(_LOOP_MAX_NGRAM, (n - i) // min_repeats) + 1):
+            unit = norm[i : i + length]
+            if not any(unit):
+                continue
+            reps = 1
+            j = i + length
+            while j + length <= n and norm[j : j + length] == unit:
+                reps += 1
+                j += length
+            need = max(min_repeats, _LOOP_MIN_REPEATS_1GRAM) if length == 1 else min_repeats
+            if reps >= need and reps * length > best_reps * best_len:
+                best_len, best_reps = length, reps
+        if best_len:
+            out.extend(words[i : i + best_len * keep])
+            i += best_len * best_reps
+            looped = True
+        else:
+            out.append(words[i])
+            i += 1
+    return " ".join(out), looped
+
+
+def is_degenerate(text: str) -> bool:
+    """True when most of the line is a decoder loop — not something to answer."""
+    words = (text or "").split()
+    if len(words) < 8:
+        return False
+    collapsed, looped = collapse_loops(text)
+    return looped and len(collapsed.split()) <= int(0.6 * len(words))
 
 
 def scene_prompt(event: str) -> str:

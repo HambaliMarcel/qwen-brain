@@ -377,6 +377,15 @@ class AssistantSession:
                     m.last_event = inner
                     self._note_sound(ev)
         live_text = strip_language_leak(ev.text or "")
+        collapsed, looped = collapse_loops(live_text)
+        if looped:
+            if is_degenerate(live_text):
+                # ASR decoder spiral. Never a 27B turn; also never a barge-in.
+                if self.ui.status not in {"THINKING", "ANSWERING"}:
+                    self.ui.set_status("LISTENING", "asr loop dropped")
+                return
+            live_text = collapsed
+            ev.text = collapsed
         if ev.type == "live" and live_text != self._stable_text:
             self._stable_text = live_text
             self._stable_at = monotonic()
