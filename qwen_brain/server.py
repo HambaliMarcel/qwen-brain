@@ -43,8 +43,6 @@ def build_server_cmd(cfg: BrainConfig, extra: Optional[list[str]] = None) -> lis
         str(model),
         "-ngl",
         str(cfg.ngl),
-        "-c",
-        str(cfg.ctx),
         "-np",
         "1",
         "--port",
@@ -56,15 +54,30 @@ def build_server_cmd(cfg: BrainConfig, extra: Optional[list[str]] = None) -> lis
         "--jinja",
         "--cache-prompt",
         "--no-webui",
-        "--reasoning-budget",
-        "0",
-        "--chat-template-kwargs",
-        '{"enable_thinking":false}',
+        "--reasoning",
+        "off",
         "-ctk",
-        "q8_0",
+        cfg.kv_type,
         "-ctv",
-        "q8_0",
+        cfg.kv_type,
+        "-b",
+        str(cfg.batch),
+        "-ub",
+        str(cfg.ubatch),
     ]
+    if cfg.fit:
+        cmd.extend(
+            [
+                "--fit",
+                "on",
+                "--fit-target",
+                str(cfg.fit_target_mib),
+                "--fit-ctx",
+                str(cfg.fit_ctx),
+            ]
+        )
+    if (not cfg.fit) or cfg.ctx_locked:
+        cmd.extend(["-c", str(cfg.ctx or 3072)])
     spec = (cfg.spec_type or "").strip().lower()
     if spec and spec not in {"none", "off", "0"}:
         cmd.extend(
@@ -75,6 +88,10 @@ def build_server_cmd(cfg: BrainConfig, extra: Optional[list[str]] = None) -> lis
                 str(cfg.spec_draft_n_max),
                 "--spec-draft-ngl",
                 str(cfg.ngl),
+                "--spec-draft-type-k",
+                cfg.kv_type,
+                "--spec-draft-type-v",
+                cfg.kv_type,
             ]
         )
     if extra:
@@ -125,7 +142,7 @@ def ensure_server(cfg: BrainConfig, start: bool) -> Optional[subprocess.Popen]:
     return proc
 
 
-def fetch_context(url: str, fallback_ctx: int = 8192) -> tuple[int, int]:
+def fetch_context(url: str, fallback_ctx: int = 3072) -> tuple[int, int]:
     """Return (tokens_used, n_ctx) from llama-server slots/props."""
     base = url.rstrip("/")
     try:

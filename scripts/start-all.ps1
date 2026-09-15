@@ -30,9 +30,12 @@ $AsrMmproj = if ($env:QWEN_ASR_MMPROJ) { $env:QWEN_ASR_MMPROJ } else { Join-Path
 $AsrPort = if ($env:QWEN_ASR_PORT) { [int]$env:QWEN_ASR_PORT } else { 9999 }
 $BrainModel = if ($env:QWEN_BRAIN_MODEL) { $env:QWEN_BRAIN_MODEL } else { "C:\AI\models\Qwen3.8-27B-Uncensored-YMQ-XS-TI.gguf" }
 $BrainPort = if ($env:QWEN_BRAIN_PORT) { [int]$env:QWEN_BRAIN_PORT } else { 8080 }
-$BrainCtx = if ($env:QWEN_BRAIN_CTX) { $env:QWEN_BRAIN_CTX } else { "8192" }
+$BrainCtx = if ($env:QWEN_BRAIN_CTX) { $env:QWEN_BRAIN_CTX } else { "3072" }
 $BrainSpecType = if ($env:QWEN_BRAIN_SPEC_TYPE) { $env:QWEN_BRAIN_SPEC_TYPE } else { "draft-mtp" }
 $BrainSpecDraftNMax = if ($env:QWEN_BRAIN_SPEC_DRAFT_N_MAX) { $env:QWEN_BRAIN_SPEC_DRAFT_N_MAX } else { "2" }
+$BrainKv = if ($env:QWEN_BRAIN_KV) { $env:QWEN_BRAIN_KV } else { "q4_0" }
+$BrainBatch = if ($env:QWEN_BRAIN_BATCH) { $env:QWEN_BRAIN_BATCH } else { "256" }
+$BrainUbatch = if ($env:QWEN_BRAIN_UBATCH) { $env:QWEN_BRAIN_UBATCH } else { "128" }
 $BusHost = if ($env:QWEN_BRAIN_STT_HOST) { $env:QWEN_BRAIN_STT_HOST } else { "127.0.0.1" }
 $BusPort = if ($env:QWEN_BRAIN_STT_PORT) { [int]$env:QWEN_BRAIN_STT_PORT } else { 18765 }
 
@@ -164,7 +167,7 @@ Write-Host "Qwen stack  one-shot"
 Write-Host "  ASR    $AsrModel  :$AsrPort"
 Write-Host "  mmproj $AsrMmproj"
 Write-Host "  brain  $BrainModel  :$BrainPort"
-Write-Host "  mtp    $BrainSpecType  n-max $BrainSpecDraftNMax"
+Write-Host "  mtp    $BrainSpecType  n-max $BrainSpecDraftNMax  kv $BrainKv  ctx $BrainCtx  b $BrainBatch ub $BrainUbatch"
 Write-Host "  bus    ${BusHost}:${BusPort}"
 Write-Host ""
 
@@ -206,21 +209,26 @@ if (Test-HttpOk $asrUrl) {
 
 if (Test-HttpOk $brainUrl) {
     $loaded = ""
+    $haveCtx = 0
     try {
         $props = Invoke-RestMethod -Uri "http://127.0.0.1:$BrainPort/props" -TimeoutSec 2
         $loaded = [string]($props.model_path)
         if (-not $loaded) { $loaded = [string]$props }
+        $haveCtx = [int]($props.default_generation_settings.n_ctx)
     } catch {}
     $want = [System.IO.Path]::GetFileName($BrainModel)
     if ($want -and $loaded -and ($loaded -notmatch [regex]::Escape($want))) {
         throw "port $BrainPort is running $loaded, want $want. Run Stop.bat then Start.bat."
+    }
+    $wantCtx = [int]$BrainCtx
+    if ($haveCtx -ne $wantCtx) {
+        throw "port $BrainPort still has ctx $haveCtx, want $wantCtx. Run Stop.bat then Start.bat."
     }
     Write-Host "reuse    brain llama-server  :$BrainPort"
 } else {
     $brainArgs = @(
         "-m", $BrainModel,
         "-ngl", "99",
-        "-c", "$BrainCtx",
         "-np", "1",
         "--port", "$BrainPort",
         "--host", "127.0.0.1",
@@ -228,16 +236,20 @@ if (Test-HttpOk $brainUrl) {
         "--jinja",
         "--cache-prompt",
         "--no-webui",
-        "--reasoning-budget", "0",
-        "--chat-template-kwargs", '{"enable_thinking":false}',
-        "-ctk", "q8_0",
-        "-ctv", "q8_0"
+        "--reasoning", "off",
+        "-ctk", $BrainKv,
+        "-ctv", $BrainKv,
+        "-c", "$BrainCtx",
+        "-b", "$BrainBatch",
+        "-ub", "$BrainUbatch"
     )
     if ($BrainSpecType -and ($BrainSpecType -notmatch '^(?i)(none|off|0)$')) {
         $brainArgs += @(
             "--spec-type", $BrainSpecType,
             "--spec-draft-n-max", "$BrainSpecDraftNMax",
-            "--spec-draft-ngl", "99"
+            "--spec-draft-ngl", "99",
+            "--spec-draft-type-k", $BrainKv,
+            "--spec-draft-type-v", $BrainKv
         )
     }
     Start-TitledProcess "Qwen brain server" $llamaDir $Llama $brainArgs
