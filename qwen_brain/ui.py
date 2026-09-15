@@ -116,7 +116,7 @@ class BrainUI:
         self.prompt_tokens = 0
         self.chars = 0
         self.ctx_used = 0
-        self.ctx_max = 8192
+        self.ctx_max = 3072
         self.metrics = SessionMetrics()
         self._lock = threading.RLock()
         self._last_header = 0.0

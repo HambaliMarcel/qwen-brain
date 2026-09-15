@@ -275,7 +275,7 @@ class AssistantSession:
         if self.cfg.backend != "llm":
             return
         try:
-            used, n_ctx = fetch_context(self.cfg.url, fallback_ctx=int(self.cfg.ctx))
+            used, n_ctx = fetch_context(self.cfg.url, fallback_ctx=max(2048, int(self.cfg.ctx or 3072)))
             if used <= 0:
                 used = int(self.ui.prompt_tokens) + int(self.ui.tokens)
             self.ui.set_context(used, n_ctx)
