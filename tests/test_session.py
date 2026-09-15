@@ -60,6 +60,7 @@ class CanonicalTurnTests(unittest.TestCase):
     def test_spoken_turn_still_finalizes_without_waiting_for_a_tag(self):
         session = self.make_session()
         session._on_event(event(type="commit", text="are you listening", utterance_id=2))
+        session._flush_held_turn()
         self.assertEqual(session._latest_prompt, "are you listening")
         self.assertEqual(session.ui.you, "are you listening")
         self.assertEqual(session._publish_job, session._job)
@@ -93,6 +94,7 @@ class CanonicalTurnTests(unittest.TestCase):
     def test_duplicate_commit_is_not_a_second_turn(self):
         session = self.make_session()
         session._on_event(event(type="commit", text="apa kabar", utterance_id=3))
+        session._flush_held_turn()
         first = session._job
         session._on_event(event(type="commit", text="apa kabar", utterance_id=3))
         self.assertEqual(session._job, first)
@@ -151,6 +153,8 @@ class CanonicalTurnTests(unittest.TestCase):
                 utterance_id=9,
             )
         )
+        self.assertEqual(session._job, 0)
+        session._flush_held_turn()
         self.assertGreaterEqual(session._job, 1)
         self.assertEqual(session._publish_job, 0)
         self.assertEqual(session.ui.you, "")
@@ -196,6 +200,24 @@ class CanonicalTurnTests(unittest.TestCase):
         )
         self.assertEqual(session._job, 0)
         self.assertEqual(session._publish_job, 0)
+
+    def test_short_commits_are_stitched_before_the_brain(self):
+        session = self.make_session()
+        session._on_event(event(type="commit", text="Every.", utterance_id=20))
+        session._on_event(event(type="commit", text="Every day.", utterance_id=21))
+        self.assertEqual(session._job, 0)
+        session._on_event(event(type="commit", text="To a joy.", utterance_id=22))
+        self.assertGreaterEqual(session._job, 1)
+        self.assertEqual(session._latest_prompt, "Every day. To a joy.")
+        self.assertEqual(session.ui.you, "Every day. To a joy.")
+
+    def test_long_commit_still_fires_immediately(self):
+        session = self.make_session()
+        session._on_event(
+            event(type="commit", text="I can't wait a moment more", utterance_id=30)
+        )
+        self.assertGreaterEqual(session._job, 1)
+        self.assertEqual(session._latest_prompt, "I can't wait a moment more")
 
     def test_live_growth_does_not_print_a_second_you(self):
         session = self.make_session()

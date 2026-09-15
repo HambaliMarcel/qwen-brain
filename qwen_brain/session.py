@@ -11,8 +11,12 @@ from .bus import SttBusClient
 from .config import BrainConfig
 from .events import (
     SttEvent,
+    collapse_loops,
     is_command_text,
+    is_degenerate,
+    is_short_fragment,
     is_sound_tag,
+    join_fragments,
     looks_complete,
     meaningfully_longer,
     same_turn,
@@ -30,7 +34,8 @@ STUCK_ANSWER_SEC = 8.0
 STALE_LIVE_SEC = 2.5
 LIVE_STABLE_SEC = 0.12
 FINALIZE_PAUSE_SEC = 0.45
-HOLD_PAUSE_SEC = 0.90
+HOLD_PAUSE_SEC = 1.50
+STITCH_SEC = 1.35
 EVENT_COOLDOWN_SEC = 2.2
 
 
@@ -126,6 +131,10 @@ class AssistantSession:
         self._printed_job = 0
         self._last_sent_event = ""
         self._last_sent_event_at = 0.0
+        self._held = ""
+        self._held_at = 0.0
+        self._held_uid = -1
+        self._held_ev: Optional[SttEvent] = None
         self._state_lock = threading.RLock()
 
     def run(self) -> int:
@@ -187,6 +196,7 @@ class AssistantSession:
                 last_tok = self._last_token_at or self._fire_at
                 if (now - last_tok) >= STUCK_ANSWER_SEC:
                     self._reset_stuck(f"answer stalled >{int(STUCK_ANSWER_SEC)}s, reset")
+            self._maybe_flush_held(now)
 
     def _reset_stuck(self, msg: str) -> None:
         self.brain.cancel()
@@ -224,6 +234,49 @@ class AssistantSession:
         self._last_event = ""
         self._last_event_at = 0.0
         self.ui.event_label = ""
+
+    def _ingest_fragment(self, text: str, ev: SttEvent) -> None:
+        """Collect breath-sized LAST pieces until the singer actually stops."""
+        body = strip_language_leak(text)
+        if not self._held:
+            if self._already_shown(ev.utterance_id, body):
+                return
+            if ev.utterance_id == self.policy.sent_uid and same_turn(self.policy.sent_text, body):
+                if not meaningfully_longer(self.policy.sent_text, body, extra=2):
+                    return
+        joined = join_fragments(self._held, body) if self._held else body
+        self._held = joined
+        self._held_at = monotonic()
+        self._held_uid = ev.utterance_id
+        self._held_ev = ev
+        if self.ui.status not in {"THINKING", "ANSWERING"}:
+            # Live line only: set_you would print a YOU row per held piece.
+            self.ui.set_live(joined)
+            self.ui.set_status("LISTENING", "holding line")
+        if joined and not is_short_fragment(joined) and looks_complete(joined):
+            self._flush_held_turn()
+
+    def _flush_held_turn(self) -> None:
+        text = strip_language_leak(self._held)
+        ev = self._held_ev
+        self._held = ""
+        self._held_at = 0.0
+        self._held_uid = -1
+        self._held_ev = None
+        if not text or ev is None:
+            return
+        self._finalize_visible(text, ev, "commit")
+
+    def _maybe_flush_held(self, now: float) -> None:
+        if not self._held:
+            return
+        if self.ui.metrics.speaking:
+            return
+        if self.ui.status in {"THINKING", "ANSWERING"}:
+            return
+        if (now - self._held_at) < STITCH_SEC:
+            return
+        self._flush_held_turn()
 
     def _already_shown(self, uid: int, text: str) -> bool:
         if uid < 0 or uid != self._shown_uid:
@@ -353,13 +406,34 @@ class AssistantSession:
                 self._fire_scene(ev)
             return
         if ev.type == "commit" and is_command_text(live_text):
+            if self._held or is_short_fragment(live_text):
+                self._ingest_fragment(live_text, ev)
+                return
             self._finalize_visible(live_text, ev, "commit")
             return
+        if (
+            ev.type == "live"
+            and not ev.speaking
+            and not ev.decoding
+            and is_command_text(live_text)
+            and (self._held or is_short_fragment(live_text))
+        ):
+            need = (
+                self.policy.eager_silence_sec
+                if looks_complete(live_text)
+                else HOLD_PAUSE_SEC
+            )
+            if float(ev.silence_sec) >= need:
+                self._ingest_fragment(live_text, ev)
+                return
         if ev.type == "live" and ev.speaking and looks_complete(live_text):
             if (monotonic() - self._stable_at) < LIVE_STABLE_SEC:
                 return
         prompt = self.policy.should_ask(ev)
         if prompt:
+            if is_short_fragment(prompt):
+                self._ingest_fragment(prompt, ev)
+                return
             visible = ev.type == "commit" or (
                 not ev.speaking
                 and not ev.decoding
@@ -382,6 +456,9 @@ class AssistantSession:
             and is_command_text(live_text)
         )
         if finished_hold:
+            if self._held or is_short_fragment(live_text):
+                self._ingest_fragment(live_text, ev)
+                return
             self._finalize_visible(live_text, ev, "eager")
 
     def _start_reply(

@@ -6,6 +6,8 @@ from qwen_brain.config import BrainConfig
 from qwen_brain.events import (
     SttEvent,
     is_command_text,
+    is_short_fragment,
+    join_fragments,
     looks_complete,
     parse_event,
     same_turn,
@@ -44,6 +46,7 @@ class EventTests(unittest.TestCase):
         self.assertFalse(is_command_text("[finger snapping]"))
         self.assertFalse(is_command_text("language Canton"))
         self.assertFalse(is_command_text("[suara non-bicara?]"))
+        self.assertFalse(is_command_text("ooh"))
         self.assertEqual(strip_language_leak("language Canton 唔該"), "唔該")
         self.assertEqual(
             with_sound_context("halo pak", "finger snapping"),
@@ -253,11 +256,22 @@ class CompletenessTests(unittest.TestCase):
         self.assertFalse(looks_complete("I'm not"))
         self.assertFalse(looks_complete("mas"))
         self.assertFalse(looks_complete("masih makan"))
+        self.assertFalse(looks_complete("What."))
+        self.assertFalse(looks_complete("You."))
+        self.assertFalse(looks_complete("Every."))
+        self.assertFalse(looks_complete("Okay."))
 
     def test_finished_lines_are_complete(self):
         self.assertTrue(looks_complete("jam berapa sekarang ya?"))
         self.assertTrue(looks_complete("oke jadi ini bagus sekali"))
         self.assertTrue(looks_complete("唔該，啲咩事啊"))
+
+    def test_short_fragments_stitch(self):
+        self.assertTrue(is_short_fragment("What."))
+        self.assertTrue(is_short_fragment("Every day."))
+        self.assertFalse(is_short_fragment("I can't wait a moment more"))
+        self.assertEqual(join_fragments("Every.", "Every day."), "Every day.")
+        self.assertEqual(join_fragments("Every day.", "To a joy."), "Every day. To a joy.")
 
 
 if __name__ == "__main__":

@@ -159,10 +159,10 @@ if (($flags -notcontains "--lid-lock") -and ($flags -notcontains "--no-lid-lock"
     $flags += "--no-lid-lock"
 }
 if ($flags -notcontains "--silence-commit") {
-    $flags += @("--silence-commit", "0.90")
+    $flags += @("--silence-commit", "1.50")
 }
 if ($flags -notcontains "--silence-hangover") {
-    $flags += @("--silence-hangover", "0.28")
+    $flags += @("--silence-hangover", "0.32")
 }
 if ($flags -notcontains "--no-auto-tune") {
     $flags += "--no-auto-tune"

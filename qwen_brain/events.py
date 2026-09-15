@@ -89,12 +89,39 @@ def is_sound_tag(text: str) -> bool:
     return bool(t) and t.startswith("[") and t.endswith("]") and "[" not in t[1:-1]
 
 
+_FILLER_WORDS = {
+    "uh",
+    "um",
+    "erm",
+    "hmm",
+    "hm",
+    "ah",
+    "aah",
+    "ahh",
+    "eh",
+    "oh",
+    "ooh",
+    "oooh",
+    "ha",
+    "haha",
+    "mm",
+    "mmm",
+}
+
+
+def _content_words(text: str) -> list[str]:
+    t = strip_language_leak(text or "")
+    t = _TAG_RE.sub(" ", t)
+    t = _SPACE_RE.sub(" ", t).strip()
+    return [w for w in t.split() if any(ch.isalnum() for ch in w)]
+
+
 def is_command_text(text: str) -> bool:
     t = strip_language_leak(text or "")
     if not t or is_sound_tag(t):
         return False
     lowered = t.lower().strip(" .!?，。！？")
-    if lowered in {"uh", "um", "erm", "hmm", "ah", "eh", "oh", "ha", "haha"}:
+    if lowered in _FILLER_WORDS:
         return False
     if "suara non-bicara" in lowered:
         rest = _TAG_RE.sub(" ", lowered)
@@ -107,19 +134,53 @@ def is_command_text(text: str) -> bool:
 def looks_complete(text: str) -> bool:
     """True when a live draft already looks like a finished utterance.
 
-    Short fragments ("I'm not", "mas") must wait for a real pause or LAST.
+    One or two words plus a period ("What.", "You.") are ASR punctuation,
+    not a finished line. Those must wait for more audio or a real hold.
     """
     t = strip_language_leak(text or "")
     t = _TAG_RE.sub(" ", t)
     t = _SPACE_RE.sub(" ", t).strip()
     if not t:
         return False
-    if t[-1] in _COMPLETE_END and len(t) >= 2:
-        return True
+    words = _content_words(t)
     cjk = len(re.findall(r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]", t))
+    if t[-1] in "?？！" and (len(words) >= 3 or cjk >= 4):
+        return True
+    if t[-1] in _COMPLETE_END and len(words) >= 5:
+        return True
     if cjk >= 4 and not re.search(r"[A-Za-zÀ-ÿ]{3,}", t):
         return True
-    return len(t.split()) >= 5
+    return len(words) >= 5
+
+
+def is_short_fragment(text: str) -> bool:
+    """True for breath-sized LAST pieces that should be stitched, not answered."""
+    t = strip_language_leak(text or "")
+    t = _TAG_RE.sub(" ", t)
+    t = _SPACE_RE.sub(" ", t).strip()
+    if not t:
+        return True
+    words = _content_words(t)
+    cjk = len(re.findall(r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]", t))
+    if cjk >= 8:
+        return False
+    if len(words) >= 5:
+        return False
+    if t[-1] in "?？！" and len(words) >= 3:
+        return False
+    return len(words) <= 3
+
+
+def join_fragments(prev: str, new: str) -> str:
+    a = strip_language_leak(prev or "").strip()
+    b = strip_language_leak(new or "").strip()
+    if not a:
+        return b
+    if not b:
+        return a
+    if same_turn(a, b):
+        return b if len(b) >= len(a) else a
+    return f"{a} {b}".strip()
 
 
 def scene_prompt(event: str) -> str:
