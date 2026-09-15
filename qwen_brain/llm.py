@@ -194,6 +194,19 @@ class LlamaBrain:
             keep = keep[1:]
         self.history = keep
 
+    def warm(self) -> None:
+        """Prefill the system prompt once so the first turn is not a cold start.
+
+        Must not call cancel(): a real ask() that starts meanwhile bumps _gen
+        and this loop simply stops; _stream closes its own response.
+        """
+        gen = self._gen
+        try:
+            for _ in self._stream(self._messages("hai"), gen, None, max_tokens=1):
+                break
+        except Exception:
+            pass
+
     def _messages(self, pending_user: str = "") -> list[dict]:
         msgs = [{"role": "system", "content": self.cfg.system_prompt or VOICE_SYSTEM_PROMPT}]
         turns: list[ChatTurn] = list(self.history)

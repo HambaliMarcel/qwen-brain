@@ -138,6 +138,7 @@ class AssistantSession:
             f"STT {self.ui.stt_endpoint}  ·  LLM {self.ui.llm_endpoint}  ·  {self.cfg.backend}",
         )
         threading.Thread(target=self._refresh_context, name="brain-ctx", daemon=True).start()
+        threading.Thread(target=self._warm_brain, name="brain-warm", daemon=True).start()
         threading.Thread(target=self._watchdog, name="brain-watchdog", daemon=True).start()
         threading.Thread(target=self._worker, name="brain-worker", daemon=True).start()
         client = SttBusClient(
@@ -160,6 +161,16 @@ class AssistantSession:
             client.stop()
             self.ui.close()
         return 0
+
+    def _warm_brain(self) -> None:
+        # First real turn otherwise pays ~1 s to prefill the system prompt.
+        if self.cfg.backend != "llm":
+            return
+        try:
+            if self.brain.ready() and self._job == 0:
+                self.brain.warm()
+        except Exception:
+            pass
 
     def _watchdog(self) -> None:
         while not self._stop.wait(0.25):
