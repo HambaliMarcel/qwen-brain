@@ -53,6 +53,10 @@ def build_server_cmd(cfg: BrainConfig, extra: Optional[list[str]] = None) -> lis
         "on",
         "--jinja",
         "--cache-prompt",
+        # No mmap: 10 GB of file-backed pages on a 16 GB box get evicted and
+        # re-read from SSD (the disk spikes); anonymous memory stays put.
+        "--load-mode",
+        "none",
         "--no-webui",
         "--reasoning",
         "off",

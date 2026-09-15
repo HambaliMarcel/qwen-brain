@@ -235,6 +235,7 @@ if (Test-HttpOk $brainUrl) {
         "-fa", "on",
         "--jinja",
         "--cache-prompt",
+        "--load-mode", "none",
         "--no-webui",
         "--reasoning", "off",
         "-ctk", $BrainKv,

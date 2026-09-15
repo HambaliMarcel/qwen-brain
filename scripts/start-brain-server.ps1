@@ -22,6 +22,7 @@ $llamaArgs = @(
   "-fa", "on",
   "--jinja",
   "--cache-prompt",
+  "--load-mode", "none",
   "--no-webui",
   "--reasoning", "off",
   "-ctk", $kv,
