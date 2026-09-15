@@ -195,11 +195,18 @@ if (Test-HttpOk $asrUrl) {
     }
     Write-Host "reuse    ASR llama-server  :$AsrPort"
 } else {
-    Start-TitledProcess "Qwen ASR server" $llamaDir $Llama @(
+    # ctx 1536 + q8 KV + b512/ub256: same hop latency, ~150 MB less VRAM.
+    # QWEN_ASR_MMPROJ_CPU=1 moves the audio encoder to CPU (-900 MB VRAM,
+    # but hops go ~130 ms -> ~500 ms); only for when the GPU is really full.
+    $asrArgs = @(
         "-m", $AsrModel,
         "--mmproj", $AsrMmproj,
         "-ngl", "99",
-        "-c", "4096",
+        "-c", "1536",
+        "-ctk", "q8_0",
+        "-ctv", "q8_0",
+        "-b", "512",
+        "-ub", "256",
         "-np", "1",
         "-n", "32",
         "--temp", "0.01",
@@ -209,9 +216,17 @@ if (Test-HttpOk $asrUrl) {
         "--jinja",
         "--prefill-assistant",
         "--cache-prompt",
-        "--mmproj-offload",
+        "--cache-ram", "0",
+        "--load-mode", "none",
         "--no-webui"
     )
+    if ($env:QWEN_ASR_MMPROJ_CPU -match '^(?i)(1|true|on|yes)$') {
+        $asrArgs += "--no-mmproj-offload"
+        Write-Host "ASR      audio encoder on CPU (QWEN_ASR_MMPROJ_CPU)"
+    } else {
+        $asrArgs += "--mmproj-offload"
+    }
+    Start-TitledProcess "Qwen ASR server" $llamaDir $Llama $asrArgs
     Wait-HttpOk $asrUrl 240 "ASR llama-server"
 }
 
