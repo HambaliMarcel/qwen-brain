@@ -76,7 +76,7 @@ class ThinkStripTests(unittest.TestCase):
 class SpeculativeHistoryTests(unittest.TestCase):
     def test_hidden_ask_does_not_pollute_history(self):
         class StubBrain(LlamaBrain):
-            def _stream(self, messages, gen=0, stats=None):
+            def _stream(self, messages, gen=0, stats=None, max_tokens=None):
                 self.seen = messages
                 yield "ready"
 
@@ -85,8 +85,9 @@ class SpeculativeHistoryTests(unittest.TestCase):
         self.assertEqual(text, "ready")
         self.assertEqual(brain.history, [])
         self.assertEqual(brain.seen[-1]["role"], "user")
-        self.assertTrue(brain.seen[-1]["content"].startswith("draft words"))
-        self.assertIn("Jangan ganti topik", brain.seen[-1]["content"])
+        # Plain user text: a per-turn steer suffix would bust the KV prefix
+        # cache of the previous exchange on every request.
+        self.assertEqual(brain.seen[-1]["content"], "draft words")
 
         brain.remember_turn("final words", text)
         self.assertEqual(

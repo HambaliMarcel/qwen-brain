@@ -25,11 +25,11 @@ class HermesBrain(LlamaBrain):
         super().__init__(cfg)
         self.base_url = (cfg.hermes_api or "http://127.0.0.1:8642").rstrip("/")
 
-    def _stream(self, messages: list[dict], gen: int = 0, stats=None) -> Iterator[str]:
+    def _stream(self, messages: list[dict], gen: int = 0, stats=None, max_tokens: int | None = None) -> Iterator[str]:
         payload = {
             "messages": messages,
             "temperature": self.cfg.temperature,
-            "max_tokens": self.cfg.max_tokens,
+            "max_tokens": int(max_tokens or self.cfg.max_tokens),
             "stream": True,
         }
         data = json.dumps(payload).encode("utf-8")
@@ -45,7 +45,7 @@ class HermesBrain(LlamaBrain):
         buf = ""
         resp = None
         try:
-            resp = urlopen(req, timeout=45.0)
+            resp = urlopen(req, timeout=120.0)
             with self._resp_lock:
                 self._resp = resp
             while gen == self._gen:

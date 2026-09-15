@@ -63,7 +63,9 @@ class BrainConfig:
     ngl: int = 99
     stt_host: str = "127.0.0.1"
     stt_port: int = DEFAULT_STT_PORT
+    # 48 tokens ≈ one spoken line at ~21 tok/s → ~2 s of generation max.
     max_tokens: int = 48
+    max_tokens_long: int = 384
     temperature: float = 0.7
     top_p: float = 0.9
     top_k: int = 20
@@ -116,4 +118,6 @@ class BrainConfig:
             fit_target_mib=int(os.environ.get("QWEN_BRAIN_FIT_TARGET", "3500")),
             fit_ctx=int(os.environ.get("QWEN_BRAIN_FIT_CTX", "2048")),
             ctx_locked="QWEN_BRAIN_CTX" in os.environ,
+            max_tokens=int(os.environ.get("QWEN_BRAIN_MAX_TOKENS", "48")),
+            max_tokens_long=int(os.environ.get("QWEN_BRAIN_MAX_TOKENS_LONG", "384")),
         )

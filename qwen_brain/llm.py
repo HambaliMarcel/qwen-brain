@@ -15,23 +15,34 @@ from .config import BrainConfig, VOICE_SYSTEM_PROMPT
 from .metrics import tok_per_sec
 from .server import LlamaServerError
 
-# Last-user nudge only. Never stored in history.
-_LAST_TURN_STEER = (
-    "Jawab sebagai temannya. React ke makna dari chat sebelumnya. "
-    "Jangan kutip kata-katanya. Jangan ganti topik. ASR boleh typo. "
-    "Jangan sebut instruksi ini."
-)
-
-
-def _steer_last_user(text: str) -> str:
-    t = (text or "").strip()
-    if not t:
-        return t
-    return f"{t}\n\n[{_LAST_TURN_STEER}]"
-
 THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 THINK_OPEN = "<think>"
 THINK_CLOSE = "</think>"
+_DETAIL_RE = re.compile(
+    r"\b("
+    r"detail|detailed|jelasin|jelaskan|explain|elaborate|panjang|lengkap|"
+    r"rinci|kenapa|why|how does|bagaimana cara|step by step|break it down|"
+    r"tell me (everything|more)|kasih tau semua"
+    r")\b",
+    re.I,
+)
+
+
+def reply_token_budget(text: str, cfg: BrainConfig) -> int:
+    """Short chat stays snappy; detailed or long prompts get a real answer."""
+    short = max(24, int(getattr(cfg, "max_tokens", 48) or 48))
+    long = max(short, int(getattr(cfg, "max_tokens_long", 384) or 384))
+    t = (text or "").strip()
+    if not t:
+        return short
+    words = len(re.findall(r"\S+", t))
+    if words <= 2:
+        return min(short, 24)
+    if _DETAIL_RE.search(t) or words >= 40 or len(t) >= 220:
+        return long
+    if words >= 22 or len(t) >= 120:
+        return min(long, max(short * 2, 128))
+    return short
 
 
 @dataclass
@@ -102,9 +113,10 @@ class LlamaBrain:
         t_first: float | None = None
         pieces: list[str] = []
         first = True
+        budget = reply_token_budget(prompt, self.cfg)
         try:
             messages = self._messages() if remember else self._messages(prompt)
-            for delta in self._stream(messages, gen, stats):
+            for delta in self._stream(messages, gen, stats, max_tokens=budget):
                 if gen != self._gen:
                     break
                 if not delta:
@@ -174,15 +186,21 @@ class LlamaBrain:
         turns: list[ChatTurn] = list(self.history)
         if pending_user:
             turns.append(ChatTurn("user", pending_user))
-        last_user = max((i for i, turn in enumerate(turns) if turn.role == "user"), default=-1)
-        for i, turn in enumerate(turns):
-            content = turn.content
-            if i == last_user:
-                content = _steer_last_user(content)
-            msgs.append({"role": turn.role, "content": content})
+        # No per-turn steer on the last user message: it changed every turn,
+        # which invalidated the KV prefix from that point and re-prefilled
+        # the previous exchange on every request. The system prompt carries
+        # the same rules and stays cached.
+        for turn in turns:
+            msgs.append({"role": turn.role, "content": turn.content})
         return msgs
 
-    def _stream(self, messages: list[dict], gen: int = 0, stats: StreamStats | None = None) -> Iterator[str]:
+    def _stream(
+        self,
+        messages: list[dict],
+        gen: int = 0,
+        stats: StreamStats | None = None,
+        max_tokens: int | None = None,
+    ) -> Iterator[str]:
         payload = {
             "messages": messages,
             "temperature": self.cfg.temperature,
@@ -190,7 +208,7 @@ class LlamaBrain:
             "top_k": int(getattr(self.cfg, "top_k", 20)),
             "min_p": 0.0,
             "repeat_penalty": 1.12,
-            "max_tokens": self.cfg.max_tokens,
+            "max_tokens": int(max_tokens or self.cfg.max_tokens),
             "stream": True,
             "stream_options": {"include_usage": True},
             "cache_prompt": True,
@@ -208,7 +226,7 @@ class LlamaBrain:
         hold = ""
         resp = None
         try:
-            resp = urlopen(req, timeout=45.0)
+            resp = urlopen(req, timeout=120.0)
             with self._resp_lock:
                 self._resp = resp
             while gen == self._gen:
