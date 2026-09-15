@@ -85,11 +85,38 @@ class CanonicalTurnTests(unittest.TestCase):
         session._job = 4
         session._job_uid = 7
         session.policy.sent_uid = 7
-        session.policy.sent_text = "hello there"
-        session._on_event(event(type="commit", text="hello there", utterance_id=7))
+        session.policy.sent_text = "hello there friend how are you"
+        session._on_event(
+            event(type="commit", text="hello there friend how are you", utterance_id=7)
+        )
         self.assertEqual(session._job, 4)
         self.assertEqual(session._publish_job, 4)
-        self.assertEqual(session.ui.you, "hello there")
+        self.assertEqual(session.ui.you, "hello there friend how are you")
+
+    def test_regrown_paragraph_only_sends_the_new_tail(self):
+        session = self.make_session()
+        sent = "I still feel a shock through every bone when I hear an I love you."
+        session._on_event(event(type="commit", text=sent, utterance_id=5))
+        session._flush_held_turn()
+        self.assertEqual(session._latest_prompt, sent)
+        session._on_event(
+            event(
+                type="commit",
+                text="I'm not sure. " + sent + " How did I fall in love this time?",
+                utterance_id=5,
+            )
+        )
+        session._flush_held_turn()
+        self.assertEqual(session._latest_prompt, "I'm not sure. How did I fall in love this time?")
+
+    def test_decoder_loop_never_becomes_a_turn(self):
+        session = self.make_session()
+        session._on_event(
+            event(type="commit", text=" ".join(["black on"] * 60), utterance_id=9)
+        )
+        session._flush_held_turn()
+        self.assertEqual(session._job, 0)
+        self.assertEqual(session._latest_prompt, "")
 
     def test_duplicate_commit_is_not_a_second_turn(self):
         session = self.make_session()
@@ -137,6 +164,8 @@ class CanonicalTurnTests(unittest.TestCase):
                 utterance_id=9,
             )
         )
+        self.assertEqual(session._job, 0)
+        session._flush_held_turn()
         self.assertGreaterEqual(session._job, 1)
         self.assertEqual(session._publish_job, session._job)
         self.assertEqual(session.ui.you, "I'm not")
@@ -153,8 +182,6 @@ class CanonicalTurnTests(unittest.TestCase):
                 utterance_id=9,
             )
         )
-        self.assertEqual(session._job, 0)
-        session._flush_held_turn()
         self.assertGreaterEqual(session._job, 1)
         self.assertEqual(session._publish_job, 0)
         self.assertEqual(session.ui.you, "")

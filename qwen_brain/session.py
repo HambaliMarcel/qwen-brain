@@ -21,6 +21,7 @@ from .events import (
     meaningfully_longer,
     same_turn,
     scene_prompt,
+    strip_already_sent,
     strip_language_leak,
 )
 from .hermes import make_brain
@@ -386,6 +387,17 @@ class AssistantSession:
                 return
             live_text = collapsed
             ev.text = collapsed
+        if ev.type == "commit":
+            # LAST re-sends the grown paragraph; answer only the unseen part.
+            for prev in (self._shown_text, self.policy.sent_text):
+                if same_turn(prev, live_text):
+                    # Same line grown or repeated: promotion/dedupe below.
+                    break
+                tail = strip_already_sent(prev, live_text)
+                if tail and tail != live_text:
+                    live_text = tail
+                    ev.text = tail
+                    break
         if ev.type == "live" and live_text != self._stable_text:
             self._stable_text = live_text
             self._stable_at = monotonic()

@@ -257,6 +257,28 @@ def is_degenerate(text: str) -> bool:
     return looped and len(collapsed.split()) <= int(0.6 * len(words))
 
 
+def strip_already_sent(prev: Optional[str], new: str) -> str:
+    """Drop the part of `new` that was already answered as `prev`.
+
+    ASR LAST grows as a paragraph and re-sends it whole. Only the words the
+    brain has not seen yet should become the next turn — a shorter prompt is
+    faster to prefill and does not answer the same lyric twice.
+    """
+    a = strip_language_leak(prev or "").strip()
+    b = strip_language_leak(new or "").strip()
+    if not a or not b:
+        return b
+    pw = _norm_words(a)
+    if len(pw) < 4:
+        return b
+    raw = b.split()
+    at = _find_span(_norm_words(b), pw)
+    if at < 0:
+        return b
+    rest = raw[:at] + raw[at + len(pw) :]
+    return " ".join(rest).strip()
+
+
 def scene_prompt(event: str) -> str:
     ev = (event or "").strip().strip("[]")
     if not ev:
