@@ -15,6 +15,9 @@ from .config import BrainConfig, VOICE_SYSTEM_PROMPT
 from .metrics import tok_per_sec
 from .server import LlamaServerError
 
+# How many turns to drop at once when history is over the cap (see _trim).
+HISTORY_TRIM_TURNS = 2
+
 THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 THINK_OPEN = "<think>"
 THINK_CLOSE = "</think>"
@@ -177,9 +180,19 @@ class LlamaBrain:
         self._trim()
 
     def _trim(self) -> None:
+        # Drop history in blocks, not one turn at a time. Dropping the oldest
+        # turn every turn shifts every later message, so llama-server's
+        # prefix cache misses and re-prefills the whole history on each ask
+        # (~+600 ms TTFT at 5 turns). Dropping HISTORY_TRIM_TURNS at once
+        # keeps the prefix stable for that many turns in between.
         cap = max(2, int(self.cfg.history_turns) * 2)
-        if len(self.history) > cap:
-            self.history = self.history[-cap:]
+        if len(self.history) <= cap:
+            return
+        floor = max(2, cap - HISTORY_TRIM_TURNS * 2)
+        keep = self.history[-floor:]
+        while keep and keep[0].role != "user":
+            keep = keep[1:]
+        self.history = keep
 
     def _messages(self, pending_user: str = "") -> list[dict]:
         msgs = [{"role": "system", "content": self.cfg.system_prompt or VOICE_SYSTEM_PROMPT}]
